@@ -15,15 +15,18 @@ Port of FeatherPlayer (`reference/FeatherPlayer.py`, ~11.8k lines, one `VideoPla
 ## Status
 The proof of concept in `src/` is done and tested by the owner on Windows: video plays inside the egui window, speeds, audio track picking/mixing and playback all work. Nothing else is ported yet.
 
-Step 1 (module split) done. Layout:
+Steps 1-4 done (step 4 partly, see below). Layout:
 - `main.rs`: arg parsing (`[--lib path] [file]`), `run_native`.
-- `app.rs`: `FeatherApp` shell (owns `Player` + views, shutdown in `on_exit`).
+- `app.rs`: `FeatherApp` shell: owns `Player`, `Prefs`, `Library`, `Scanner` and the views; handles scan/thumbnail messages, folder actions, playing a clip (`play` = Python `_play_index`), prefs saving; shutdown in `on_exit`.
 - `mpv.rs`: libmpv loader/wrapper.
 - `player/`: `mod.rs` (`Player`: open, play/pause, seek, volume, speed, poll), `audio.rs` (tracks, `build_graph`, `apply_audio`), `video_gl.rs` (FBO + paint callback).
-- `ui/`: `widgets.rs` (seek bar, play button), `player_view.rs` (`PlayerView`: player screen layout and UI-only state), `fmt_time`.
-- `theme.rs`: colors and `apply()`.
+- `library.rs`: the clip list (`videos` sorted in place like Python, per-clip date/MB/"N days ago" labels, sort Newest/Oldest/Largest/Smallest, filter All/Starred/Liked/Trimmed, `visible_count` 50 + "Load more" step from settings `see_more_step`, current clip, right-click selection).
+- `ui/`: `widgets.rs` (Pill, GhostButton, RoundedPopup/PopupRow, ellipsize, seek bar, play button), `icons.rs` (Python `_icon_image` vector icons via tiny-skia, cached textures, shadowed variant), `clip_grid.rs` (sidebar: filter/sort pill + virtualized single-column card list, heart toggles like, right-drag selects), `header.rs` ("ALL CLIPS" + count + size, Folder pill with saved-folders dropdown, Refresh), `player_view.rs` (video, now-playing row, PoC controls in theme colours, audio overlay), `fmt_time`.
+- `theme.rs`: full port of the Python theme engine (8 themes, default "Obsidian", `accent_overrides`, colorsys maths). `c("#rrggbb")` = Python `_c()`. Verified: all 152 themed colours equal the Python output. Fonts: Segoe UI from `C:\Windows\Fonts` at tk point sizes (9pt = 12px).
 - `prefs.rs` (step 2 done): `data_dir()` (with FeatherLauncher2 migration), `settings.json` (`read_settings`/`save_setting`, pretty JSON, tmp+rename), `Prefs` for `.clipplayer_prefs.json` (backup to `backups\prefs_*.json` before each save, keep 30, refuse accidental wipes, fall back to newest backup). Unknown/untyped keys are kept on save (Python drops unknown keys). `durations`, `trims` (floats 0..10000), `category_renames`, `keyword_groups` are still raw JSON: type them in their porting step. Volume is loaded from prefs (default 55) and prefs are saved on exit, like Python `on_close`. `cargo test -- --ignored real_prefs` checks the real file round-trips (read-only).
-- `scanner.rs`: empty placeholder for step 3.
+- `scanner.rs` (step 3 done): background folder scan (folder + one subfolder level, Python path format `base + "\\" + name`, filename dates), `find_ffmpeg` (exe dir `ffmpeg\`, data dir `ffmpeg\`, PATH, C:\ffmpeg), ffprobe durations into prefs `durations`, thumbnails in `.clipplayer_cache` with the SAME md5 cache key as Python (verified: existing thumbnails are reused), 4 worker threads with new-clips-first priority. `game_name_from_filename` for the now-playing label.
+- Paths from folder dialogs are stored with forward slashes like Tk (`Z:/All clips/Clips`), because folder strings are part of every clip key in prefs.
+- Not ported yet from the main window: the full player controls (frame step, star/heart buttons, trim slider, speed and audio menus), game/category filter and calendar (step 5), the other header actions (delete, categorize, show in folder, share, compress, settings), automatic folder refresh (Python checks every 4 s), the 16:9 sidebar auto-fit, saved window size. Durations are saved at most every 2 s (Python saved prefs after every single one).
 
 ## Architecture decisions (keep unless there is a good reason)
 - **GUI:** eframe/egui 0.33 with the **glow** (OpenGL) renderer. Needs Rust 1.88+.
@@ -37,8 +40,8 @@ Step 1 (module split) done. Layout:
 ## Rough porting order
 1. Project structure: split `main.rs` into modules (player, ui widgets, theme, prefs, scanner).
 2. Prefs/settings (JSON with backups) and the data folder (`%USERPROFILE%\FeatherPlayer`).
-3. Clip folder scanning (background threads, `walkdir`/`rayon`) and thumbnails (ffmpeg subprocess).
-4. Clip grid (virtualized) with relative-time labels, theme ("Vibrant Neon"), custom widgets.
+3. Clip folder scanning (background threads) and thumbnails (ffmpeg subprocess).
+4. Clip grid (virtualized) with relative-time labels, theme engine (Python has 8 themes, default "Obsidian"; there is no "Vibrant Neon" theme in the code), custom widgets.
 5. Categories/keywords (careful: the Python version had a bug that destructively deleted keyword groups).
 6. Trim and lossless clip (`ffmpeg -c copy`), multi-clip compression (NVENC with fallback).
 7. Cloud-sync star, phone/ClipSync sync, recycle bin (`trash` crate).

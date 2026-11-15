@@ -7,16 +7,17 @@
 //!   ui      - widgets and views
 //!   theme   - colors and style
 //!   prefs   - data folder, settings.json, clip prefs with backups
-//!   scanner - clip folder scanning and thumbnails (step 3)
+//!   scanner - clip folder scanning, ffprobe durations, ffmpeg thumbnails
+//!   library - the clip list: sort, filter, visible count, selection
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod library;
 mod mpv;
 mod player;
 #[allow(dead_code)] // API used by later porting steps
 mod prefs;
-#[allow(dead_code)]
 mod scanner;
 mod theme;
 mod ui;
@@ -40,7 +41,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 720.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("FeatherPlayer")
+            .with_title("Feather Player")
             .with_drag_and_drop(true),
         ..Default::default()
     };

@@ -216,6 +216,31 @@ impl Prefs {
         }
     }
 
+    /// Duration string ("m:ss") stored for a clip path.
+    pub fn duration(&self, path: &str) -> Option<&str> {
+        self.raw.get("durations")?.as_object()?.get(path)?.as_str()
+    }
+
+    pub fn has_duration(&self, path: &str) -> bool {
+        self.raw.get("durations").and_then(|d| d.as_object()).is_some_and(|d| d.contains_key(path))
+    }
+
+    pub fn set_duration(&mut self, path: &str, dur: &str) {
+        let d = self.raw.entry("durations").or_insert_with(|| Value::Object(Map::new()));
+        if !d.is_object() {
+            *d = Value::Object(Map::new());
+        }
+        if let Some(m) = d.as_object_mut() {
+            m.insert(path.to_owned(), Value::String(dur.to_owned()));
+        }
+    }
+
+    /// Trim of a clip as fractions 0..1 (stored as [start, end] on a 0..10000 scale).
+    pub fn trim(&self, path: &str) -> Option<(f64, f64)> {
+        let a = self.raw.get("trims")?.as_object()?.get(path)?.as_array()?;
+        Some((a.first()?.as_f64()? / 10000.0, a.get(1)?.as_f64()? / 10000.0))
+    }
+
     /// The full JSON object that `save` would write.
     pub fn to_json(&self) -> Map<String, Value> {
         let mut d = self.raw.clone();

@@ -31,6 +31,18 @@ pub struct Player {
     pub audio_status: String,
     lavfi_cur: String,
     pub msg: String,
+    /// Where to land once the duration of a just-opened clip is known.
+    pending_start: Option<(Start, Instant)>,
+}
+
+/// Where a clip opens (Python `_play_index` / `_seek_after_load`).
+#[derive(Clone, Copy)]
+pub enum Start {
+    /// The middle of clips longer than 15 s, else the beginning.
+    Middle,
+    Beginning,
+    /// Trim start, as a fraction of the duration.
+    Trim(f64),
 }
 
 impl Player {
@@ -69,6 +81,7 @@ impl Player {
             audio_status: String::new(),
             lavfi_cur: String::new(),
             msg: String::new(),
+            pending_start: None,
         };
         let _ = p.core.set("volume", &format!("{}", p.volume));
         Ok(p)
@@ -89,9 +102,42 @@ impl Player {
                 self.hold = None;
                 self.audio_status.clear();
                 self.msg.clear();
+                self.pending_start = None;
             }
             Err(e) => self.msg = e,
         }
+    }
+
+    /// Open a clip from the list and seek to its start point once the duration is known.
+    pub fn open_clip(&mut self, path: &str, start: Start) {
+        self.open(path);
+        let _ = self.core.set("pause", "no");
+        self.pending_start = Some((start, Instant::now()));
+    }
+
+    pub fn playing(&self) -> bool {
+        self.loaded && !self.paused && !self.eof
+    }
+
+    fn apply_pending_start(&mut self) {
+        let Some((start, since)) = self.pending_start else { return };
+        if since.elapsed() > Duration::from_secs(3) {
+            self.pending_start = None; // Python gives up after 60 x 50 ms
+            return;
+        }
+        let dur = self.core.getf("duration").unwrap_or(0.0);
+        if dur <= 0.0 {
+            return;
+        }
+        self.pending_start = None;
+        let t = match start {
+            Start::Trim(f) if f > 0.0 => f * dur,
+            Start::Middle if dur > 15.0 => dur * 0.5,
+            _ => return,
+        };
+        let _ = self.core.cmd(&["seek", &format!("{t}"), "absolute"]);
+        self.pos = t;
+        self.hold = Some((Instant::now() + Duration::from_millis(400), t));
     }
 
     pub fn toggle_play(&mut self) {
@@ -135,6 +181,7 @@ impl Player {
             }
         }
         if self.loaded {
+            self.apply_pending_start();
             self.dur = self.core.getf("duration").unwrap_or(self.dur);
             if let Some(p) = self.core.getf("time-pos") {
                 self.pos = p;
