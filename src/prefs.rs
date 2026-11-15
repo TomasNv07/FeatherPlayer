@@ -142,10 +142,21 @@ impl JsonGet for Map<String, Value> {
 // .clipplayer_prefs.json
 // ---------------------------------------------------------------------------------------------
 
+/// A user category: clips whose normalised filename starts with one of `keywords` join it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeywordGroup {
+    pub label: String,
+    pub keywords: Vec<String>,
+    /// Any other fields in the JSON object, written back untouched.
+    pub extra: Map<String, Value>,
+}
+
 /// Clip prefs. Typed fields are the ones ported so far; everything else stays in `raw`
 /// untouched and is written back as it was. Not typed yet (later steps): `durations`
-/// (path -> "m:ss"), `trims` (name -> [start, end] on a 0..10000 scale, floats),
-/// `category_renames`, `keyword_groups`.
+/// (path -> "m:ss"), `trims` (name -> [start, end] on a 0..10000 scale, floats).
+///
+/// `keyword_groups` and `category_renames` keep the file's order (serde_json
+/// `preserve_order`): the first keyword group that matches a clip wins, like Python's dict order.
 pub struct Prefs {
     dir: PathBuf,
     pub raw: Map<String, Value>,
@@ -161,6 +172,25 @@ pub struct Prefs {
     pub trim_enabled: BTreeSet<String>,
     pub game_filter: String,
     pub game_multi: BTreeSet<String>,
+    /// category key -> group, in file order.
+    pub keyword_groups: Vec<(String, KeywordGroup)>,
+    /// auto-detected category key -> user's label, in file order.
+    pub category_renames: Vec<(String, String)>,
+}
+
+fn parse_groups(v: Option<&Value>) -> Vec<(String, KeywordGroup)> {
+    let Some(Value::Object(m)) = v else { return Vec::new() };
+    m.iter()
+        .map(|(k, g)| {
+            let mut extra = g.as_object().cloned().unwrap_or_default();
+            let label = extra.remove("label").and_then(|l| l.as_str().map(str::to_owned)).unwrap_or_else(|| k.clone());
+            let keywords = match extra.remove("keywords") {
+                Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect(),
+                _ => Vec::new(),
+            };
+            (k.clone(), KeywordGroup { label, keywords, extra })
+        })
+        .collect()
 }
 
 impl Prefs {
@@ -195,6 +225,11 @@ impl Prefs {
             trim_enabled: raw.get_str_list("trim_enabled").into_iter().collect(),
             game_filter,
             game_multi,
+            keyword_groups: parse_groups(raw.get("keyword_groups")),
+            category_renames: match raw.get("category_renames") {
+                Some(Value::Object(m)) => m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect(),
+                _ => Vec::new(),
+            },
             raw,
         };
         p.fix_folders();
@@ -241,6 +276,29 @@ impl Prefs {
         Some((a.first()?.as_f64()? / 10000.0, a.get(1)?.as_f64()? / 10000.0))
     }
 
+    pub fn group(&self, key: &str) -> Option<&KeywordGroup> {
+        self.keyword_groups.iter().find(|(k, _)| k == key).map(|(_, g)| g)
+    }
+
+    pub fn group_mut(&mut self, key: &str) -> Option<&mut KeywordGroup> {
+        self.keyword_groups.iter_mut().find(|(k, _)| k == key).map(|(_, g)| g)
+    }
+
+    pub fn rename(&self, key: &str) -> Option<&str> {
+        self.category_renames.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    pub fn set_rename(&mut self, key: &str, label: Option<String>) {
+        match (self.category_renames.iter().position(|(k, _)| k == key), label) {
+            (Some(i), Some(l)) => self.category_renames[i].1 = l,
+            (None, Some(l)) => self.category_renames.push((key.to_owned(), l)),
+            (Some(i), None) => {
+                self.category_renames.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+
     /// The full JSON object that `save` would write.
     pub fn to_json(&self) -> Map<String, Value> {
         let mut d = self.raw.clone();
@@ -257,7 +315,20 @@ impl Prefs {
         d.insert("trim_enabled".into(), list(&mut self.trim_enabled.iter()));
         d.insert("game_filter".into(), self.game_filter.clone().into());
         d.insert("game_multi".into(), list(&mut self.game_multi.iter()));
-        for k in ["durations", "trims", "category_renames", "keyword_groups"] {
+        let groups: Map<String, Value> = self
+            .keyword_groups
+            .iter()
+            .map(|(k, g)| {
+                let mut o = Map::new();
+                o.insert("label".into(), g.label.clone().into());
+                o.insert("keywords".into(), Value::Array(g.keywords.iter().map(|s| Value::String(s.clone())).collect()));
+                o.extend(g.extra.clone());
+                (k.clone(), Value::Object(o))
+            })
+            .collect();
+        d.insert("keyword_groups".into(), Value::Object(groups));
+        d.insert("category_renames".into(), Value::Object(self.category_renames.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()));
+        for k in ["durations", "trims"] {
             d.entry(k).or_insert_with(|| Value::Object(Map::new()));
         }
         d

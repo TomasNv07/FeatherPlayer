@@ -1,6 +1,7 @@
 //! UI: custom widgets and views.
 
 pub mod clip_grid;
+pub mod dialogs;
 pub mod header;
 pub mod icons;
 pub mod player_view;

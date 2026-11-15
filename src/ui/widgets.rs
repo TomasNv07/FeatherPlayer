@@ -182,11 +182,13 @@ pub struct Row<'a> {
     pub check: Option<bool>,
     pub subtitle: &'a str,
     pub icon: Option<&'static str>,
+    /// Dim text at the right (e.g. a clip count).
+    pub right_text: String,
 }
 
 impl<'a> Row<'a> {
     pub fn new(text: &'a str) -> Self {
-        Row { text, font: theme::font_ui(), height: 30.0, active: false, check: None, subtitle: "", icon: None }
+        Row { text, font: theme::font_ui(), height: 30.0, active: false, check: None, subtitle: "", icon: None, right_text: String::new() }
     }
     pub fn font(mut self, f: FontId) -> Self {
         self.font = f;
@@ -206,6 +208,10 @@ impl<'a> Row<'a> {
     }
     pub fn subtitle(mut self, s: &'a str) -> Self {
         self.subtitle = s;
+        self
+    }
+    pub fn right_text(mut self, t: String) -> Self {
+        self.right_text = t;
         self
     }
     pub fn icon(mut self, i: &'static str) -> Self {
@@ -242,7 +248,10 @@ impl<'a> Row<'a> {
             x += 28.0;
         }
         let mut right_w = 12.0;
-        if self.active && self.check.is_none() && self.icon.is_none() {
+        if !self.right_text.is_empty() {
+            ui.painter().text(Pos2::new(rect.right() - 12.0, cy), egui::Align2::RIGHT_CENTER, &self.right_text, theme::font_tiny(), theme::text_dim());
+            right_w = 12.0 + self.right_text.chars().count() as f32 * 6.0 + 8.0;
+        } else if self.active && self.check.is_none() && self.icon.is_none() {
             icons::paint(ui, Pos2::new(rect.right() - 16.0, cy), "check", 12.0, theme::accent(), false, 2.4);
             right_w = 32.0;
         }
@@ -321,6 +330,32 @@ pub fn play_button(ui: &mut egui::Ui, playing: bool) -> egui::Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// Python `RoundedButton` (radius 9, 1px border a bit lighter than the fill).
+pub fn rounded_button(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32, hover_bg: Color32, font: FontId, padx: f32, pady: f32) -> egui::Response {
+    let tw = text_width(ui, text, &font);
+    let h = (font.size * 1.33 + pady * 2.0).max(22.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(tw + padx * 2.0, h), Sense::click());
+    let fill = if resp.hovered() { hover_bg } else { bg };
+    let lighter = |c: Color32| Color32::from_rgb(c.r().saturating_add(28), c.g().saturating_add(28), c.b().saturating_add(28));
+    ui.painter().rect(rect, 9.0, fill, Stroke::new(1.0_f32, lighter(fill)), egui::StrokeKind::Inside);
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, font, fg);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// Single-line text field in the dialog style (#242444 fill, flat).
+pub fn entry(ui: &mut egui::Ui, text: &mut String, width: f32) -> egui::Response {
+    egui::Frame::new()
+        .fill(c("#242444"))
+        .inner_margin(egui::Margin::symmetric(6, 6))
+        .show(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(text).font(theme::font_ui()).text_color(theme::text_primary()).frame(false).desired_width(width - 12.0))
+        })
+        .inner
 }
 
 /// Top-rounded rectangle (thumbnail area of a clip card).

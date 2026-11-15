@@ -133,6 +133,14 @@ fn game_alias(label: &str) -> String {
     GAME_ALIASES.iter().find(|(k, _)| *k == n).map(|(_, v)| v.to_string()).unwrap_or_else(|| label.to_owned())
 }
 
+/// Python `os.path.splitext(name)[0]` (a leading dot is not an extension).
+pub fn stem(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(i) if i > 0 && !name[..i].chars().all(|c| c == '.') => &name[..i],
+        _ => name,
+    }
+}
+
 /// Python `game_name_from_filename`.
 pub fn game_name_from_filename(name: &str) -> String {
     static RES: OnceLock<[Regex; 4]> = OnceLock::new();
@@ -140,11 +148,7 @@ pub fn game_name_from_filename(name: &str) -> String {
         [re(r"(?i)\.DVR$"), re(r"(?i)^(.+?)-clip-from-[A-Za-z]+-\d{1,2}-\d{4}"), re(r"^(.+?)_(\d{4}-\d{2}-\d{2})"), re(r"^(.+?)\s+\d{4}\.\d{2}\.\d{2}")]
     });
     let name = basename(name);
-    let stem = match name.rfind('.') {
-        Some(i) if i > 0 && !name[..i].chars().all(|c| c == '.') => &name[..i],
-        _ => name,
-    };
-    let stem = dvr.replace(stem, "").into_owned();
+    let stem = dvr.replace(stem(name), "").into_owned();
     if let Some(c) = clipfrom.captures(&stem) {
         let label = c[1].replace(['-', '_'], " ").trim().to_owned();
         return if label.is_empty() { "Moments".into() } else { game_alias(&label) };

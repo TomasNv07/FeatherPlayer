@@ -1,11 +1,12 @@
 //! App shell: owns the player, prefs, clip library, scanner and the views.
 
-use crate::library::Library;
+use crate::library::{self, Library};
 use crate::player::{Player, Start};
 use crate::prefs::{self, JsonGet, Prefs};
 use crate::scanner::{self, Msg, Scanner};
 use crate::theme;
 use crate::ui::clip_grid::{Badges, ClipGrid, GridAction};
+use crate::ui::dialogs::{CategorizeDialog, RenameDialog};
 use crate::ui::header::{Header, HeaderAction};
 use crate::ui::player_view::PlayerView;
 use eframe::{egui, glow};
@@ -31,6 +32,8 @@ pub struct FeatherApp {
     start_always: bool,
     start_zero: HashSet<String>,
     dur_dirty: Option<Instant>,
+    rename: Option<RenameDialog>,
+    categorize: Option<CategorizeDialog>,
 }
 
 /// Folder from a dialog, written like Tk's askdirectory ("Z:/All clips/Clips"), since folder
@@ -65,6 +68,8 @@ impl FeatherApp {
             start_always: st.get_bool("always_start_beginning", false),
             start_zero: st.get_str_list("start_from_beginning_clips").into_iter().collect(),
             dur_dirty: None,
+            rename: None,
+            categorize: None,
             prefs,
         };
         app.load_folders();
@@ -104,7 +109,7 @@ impl FeatherApp {
                     if r.scan_id != self.scanner.current_scan() {
                         continue; // superseded by a newer refresh
                     }
-                    let new: HashSet<String> = self.lib.apply_scan(r).into_iter().collect();
+                    let new: HashSet<String> = self.lib.apply_scan(r, &mut self.prefs).into_iter().collect();
                     let current: HashSet<&String> = self.lib.videos.iter().collect();
                     self.grid.thumbs.retain(|k, _| current.contains(k));
                     self.view.now_playing.clear();
@@ -151,7 +156,10 @@ impl FeatherApp {
         let name = scanner::basename(&path);
         let info = self.lib.info.get(&path);
         let ts = info.and_then(|i| i.clip_dt).map(|d| d.format("%d.%m.%Y %H:%M").to_string()).unwrap_or_default();
-        let game = scanner::game_name_from_filename(name);
+        // category label (keyword group / rename) first, like Python `_format_now_playing`
+        let game = library::category_key_for_video(&path, &self.prefs.keyword_groups)
+            .and_then(|k| self.lib.cats.norm_map.get(&k).cloned())
+            .unwrap_or_else(|| scanner::game_name_from_filename(name));
         self.view.now_playing = if ts.is_empty() { game } else { format!("{game}  {ts}") };
         self.view.now_playing_mb = info.map(|i| format!("{:.1} MB", i.size as f64 / (1024.0 * 1024.0))).unwrap_or_default();
         self.lib.current = Some(path);
@@ -202,6 +210,12 @@ impl FeatherApp {
                 self.load_folders();
             }
             HeaderAction::Refresh => self.load_folders(),
+            HeaderAction::Categorize => self.categorize = Some(CategorizeDialog::new(self.lib.current.as_deref())),
+            HeaderAction::ShowInFolder => {
+                if let Some(p) = &self.lib.current {
+                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.replace('/', "\\"))).spawn();
+                }
+            }
         }
     }
 }
@@ -261,6 +275,46 @@ impl eframe::App for FeatherApp {
                     self.prefs.save();
                 }
                 GridAction::ListChanged => self.load_thumbs(None),
+                GridAction::SelectGame(key) => {
+                    self.prefs.game_filter = key;
+                    self.prefs.game_multi.clear();
+                    self.lib.visible_count = library::VISIBLE_START;
+                    self.load_thumbs(None);
+                }
+                GridAction::ToggleGameMulti(key) => {
+                    // Python `_toggle_game_multi`
+                    if key == "All" {
+                        self.prefs.game_multi.clear();
+                    } else {
+                        let gf = self.prefs.game_filter.clone();
+                        if self.prefs.game_multi.is_empty() && gf != "All" && !gf.is_empty() && self.lib.cats.norm_map.contains_key(&gf) {
+                            self.prefs.game_multi.insert(gf); // keep a single left-click choice
+                        }
+                        if !self.prefs.game_multi.remove(&key) {
+                            self.prefs.game_multi.insert(key);
+                        }
+                    }
+                    self.prefs.game_filter = "All".into();
+                    self.prefs.save();
+                    self.lib.visible_count = library::VISIBLE_START;
+                    self.load_thumbs(None);
+                }
+                GridAction::RenameCategory(key) => self.rename = RenameDialog::new(&key, &self.lib),
+            }
+        }
+
+        if let Some(d) = &mut self.rename {
+            if !d.show(ctx, &mut self.prefs, &mut self.lib) {
+                self.rename = None;
+            }
+        }
+        if let Some(d) = &mut self.categorize {
+            let (open, changed) = d.show(ctx, &mut self.prefs, &mut self.lib);
+            if changed {
+                self.load_thumbs(None);
+            }
+            if !open {
+                self.categorize = None;
             }
         }
     }

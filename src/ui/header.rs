@@ -18,6 +18,8 @@ pub enum HeaderAction {
     /// Checkbox of a saved folder in the dropdown.
     ToggleFolder(String),
     Refresh,
+    Categorize,
+    ShowInFolder,
 }
 
 #[derive(Default)]
@@ -69,10 +71,22 @@ impl Header {
                     self.dropdown = Some(a);
                 }
                 ui.add_space(8.0);
+                // actions (right to left): Categorize | Show in folder | Refresh
                 widgets::pill_frame().show(ui, |ui| {
-                    if Ghost::new("").icon("refresh", 18.0).padx(8.0).show(ui).on_hover_text("Refresh").clicked() {
-                        acts.push(HeaderAction::Refresh);
-                    }
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        if Ghost::new("").icon("refresh", 18.0).padx(8.0).show(ui).on_hover_text("Refresh").clicked() {
+                            acts.push(HeaderAction::Refresh);
+                        }
+                        widgets::pill_divider(ui);
+                        if Ghost::new("").icon("folder", 18.0).padx(8.0).show(ui).on_hover_text("Show in folder").clicked() {
+                            acts.push(HeaderAction::ShowInFolder);
+                        }
+                        widgets::pill_divider(ui);
+                        if Ghost::new("").icon("plus", 18.0).padx(8.0).show(ui).on_hover_text("Categorize clips").clicked() {
+                            acts.push(HeaderAction::Categorize);
+                        }
+                    });
                 });
             });
         });

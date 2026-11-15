@@ -3,26 +3,67 @@
 
 use super::icons;
 use super::widgets::{self, Ghost, Row};
-use crate::library::{Filter, Library, Sort, LOAD_ALL_ASK};
+use crate::library::{Filter, Library, Sort, LOAD_ALL_ASK, NONE_KEY};
+use chrono::{Datelike, Local, NaiveDate};
 use crate::prefs::Prefs;
 use crate::theme::{self, c};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use std::collections::{HashMap, HashSet};
 
 const CARD_BORDER: f32 = 3.0;
+/// Calendar day cell (Tk label width=3 in FONT_TINY, pady 3).
+const CAL_CELL: (f32, f32) = (30.0, 24.0);
+
+fn calendar_size() -> (f32, f32) {
+    (7.0 * (CAL_CELL.0 + 2.0) + 18.0, 0.0)
+}
+
+/// Weeks of a month, Monday first; days outside the month are None.
+fn month_weeks(y: i32, m: u32) -> Vec<[Option<NaiveDate>; 7]> {
+    let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) else { return Vec::new() };
+    let mut weeks = Vec::new();
+    let mut week = [None; 7];
+    let mut d = first;
+    let mut col = first.weekday().num_days_from_monday() as usize;
+    while d.month() == m {
+        week[col] = Some(d);
+        col += 1;
+        if col == 7 {
+            weeks.push(week);
+            week = [None; 7];
+            col = 0;
+        }
+        match d.succ_opt() {
+            Some(n) => d = n,
+            None => break,
+        }
+    }
+    if col > 0 {
+        weeks.push(week);
+    }
+    weeks
+}
 const PAD: f32 = 4.0;
 
 pub enum GridAction {
     Play(String),
     ToggleLike(String),
-    /// Sort, filter or "load more" changed which clips are listed: reload thumbnails.
+    /// Sort, filter, date or "load more" changed which clips are listed: reload thumbnails.
     ListChanged,
+    /// Left click on a category: show only it ("All" = everything).
+    SelectGame(String),
+    /// Right click on a category: add/remove it from the multi-selection (popup stays open).
+    ToggleGameMulti(String),
+    /// Middle click on a category: rename its label.
+    RenameCategory(String),
 }
 
 #[derive(PartialEq, Clone, Copy)]
 enum Drop {
+    Game,
     Filter,
     Sort,
+    Date,
 }
 
 #[derive(Default)]
@@ -31,6 +72,9 @@ pub struct ClipGrid {
     rb_drag: bool,
     rb_toggled: HashSet<String>,
     open: Option<DropState>,
+    /// Month shown in the calendar, and whether its year list is open.
+    cal_ym: (i32, u32),
+    cal_year_open: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -48,78 +92,352 @@ pub struct Badges<'a> {
 impl ClipGrid {
     pub fn show(&mut self, ui: &mut egui::Ui, lib: &mut Library, prefs: &Prefs, badges: &Badges) -> Vec<GridAction> {
         let mut acts = Vec::new();
-        self.header(ui, lib, &mut acts);
+        self.header(ui, lib, prefs, &mut acts);
         self.grid(ui, lib, prefs, badges, &mut acts);
         acts
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, lib: &mut Library, acts: &mut Vec<GridAction>) {
-        let mut filter_rect = Rect::NOTHING;
-        let mut sort_rect = Rect::NOTHING;
+    fn header(&mut self, ui: &mut egui::Ui, lib: &mut Library, prefs: &Prefs, acts: &mut Vec<GridAction>) {
+        let mut rects: Vec<(Drop, Rect)> = Vec::new();
+        let mut clicked: Option<(Drop, Rect)> = None;
+        let mut hovered: Option<(Drop, Rect)> = None;
+        let mut clear_date = false;
+        let game_text = lib.cats.button_text(prefs);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
-            widgets::pill_frame().show(ui, |ui| {
+            // calendar pill at the right, the stretching pill takes what is left
+            let row_w = ui.available_width();
+            ui.allocate_ui_with_layout(Vec2::new(row_w, theme::CTRL_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let col_w = ((ui.available_width() - 1.0) / 2.0).floor();
-                ui.horizontal(|ui| {
-                    let r = Ghost::new(lib.filter.label()).font(theme::font_tiny()).fg(theme::text_primary()).arrow().width(col_w).show(ui);
-                    filter_rect = r.rect;
-                    if r.clicked() {
-                        self.toggle(Drop::Filter, r.rect);
-                    } else if r.hovered() && self.open.is_some_and(|o| o.which == Drop::Sort) {
-                        self.open = Some(DropState { which: Drop::Filter, anchor: r.rect });
+                widgets::pill_frame().show(ui, |ui| {
+                    let mut g = Ghost::new("").icon("calendar", 16.0).fg(theme::text_primary()).padx(8.0);
+                    if lib.date_from.is_some() {
+                        g = g.accent_icon();
                     }
-                    widgets::pill_divider(ui);
-                    let r = Ghost::new(lib.sort.label()).font(theme::font_tiny()).fg(theme::text_primary()).arrow().width(ui.available_width()).show(ui);
-                    sort_rect = r.rect;
+                    let r = g.show(ui);
+                    rects.push((Drop::Date, r.rect));
                     if r.clicked() {
-                        self.toggle(Drop::Sort, r.rect);
-                    } else if r.hovered() && self.open.is_some_and(|o| o.which == Drop::Filter) {
-                        self.open = Some(DropState { which: Drop::Sort, anchor: r.rect });
+                        clicked = Some((Drop::Date, r.rect));
                     }
+                    if r.secondary_clicked() {
+                        clear_date = true;
+                    }
+                });
+                ui.add_space(6.0);
+                // frame: 2px margin + 1px stroke on each side
+                let inner_w = (ui.available_width() - 6.0).floor().max(60.0);
+                widgets::pill_frame().show(ui, |ui| {
+                    ui.set_width(inner_w);
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    let col_w = ((inner_w - 2.0) / 3.0).floor();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        let items = [(Drop::Game, game_text.as_str()), (Drop::Filter, lib.filter.label()), (Drop::Sort, lib.sort.label())];
+                        for (i, (d, text)) in items.into_iter().enumerate() {
+                            if i > 0 {
+                                widgets::pill_divider(ui);
+                            }
+                            let w = if i == 2 { inner_w - 2.0 * col_w - 2.0 } else { col_w };
+                            let r = Ghost::new(text).font(theme::font_tiny()).fg(theme::text_primary()).arrow().width(w).show(ui);
+                            rects.push((d, r.rect));
+                            if r.clicked() {
+                                clicked = Some((d, r.rect));
+                            } else if r.hovered() {
+                                hovered = Some((d, r.rect));
+                            }
+                        }
+                    });
                 });
             });
         });
+        if clear_date {
+            lib.set_date_range(None, None, false);
+            self.open = None;
+            acts.push(GridAction::ListChanged);
+        }
+        if let Some((d, r)) = clicked {
+            self.toggle(d, r, lib);
+        } else if let (Some((d, r)), Some(o)) = (hovered, self.open) {
+            // hovering another dropdown button while one is open switches to it
+            if o.which != d && o.which != Drop::Date && d != Drop::Date {
+                self.open = Some(DropState { which: d, anchor: r });
+            }
+        }
 
         let Some(open) = self.open else { return };
         let ctx = ui.ctx().clone();
         let pos = Pos2::new(open.anchor.left(), open.anchor.bottom() + 3.0);
-        let width = open.anchor.width().max(130.0);
-        let mut chosen = false;
+        let mut close = false;
         let popup = match open.which {
-            Drop::Filter => widgets::popup(&ctx, "filter_popup", pos, width, |ui| {
+            Drop::Filter => widgets::popup(&ctx, "filter_popup", pos, open.anchor.width().max(130.0), |ui| {
                 for f in Filter::ALL {
                     if Row::new(f.label()).font(theme::font_tiny()).height(28.0).active(f == lib.filter).show(ui).clicked() {
                         lib.set_filter(f);
-                        chosen = true;
+                        acts.push(GridAction::ListChanged);
+                        close = true;
                     }
                 }
             }),
-            Drop::Sort => widgets::popup(&ctx, "sort_popup", pos, width, |ui| {
+            Drop::Sort => widgets::popup(&ctx, "sort_popup", pos, open.anchor.width().max(130.0), |ui| {
                 for s in Sort::ALL {
                     if Row::new(s.label()).font(theme::font_tiny()).height(28.0).active(s == lib.sort).show(ui).clicked() {
                         lib.apply_sort(s, true);
-                        chosen = true;
+                        acts.push(GridAction::ListChanged);
+                        close = true;
                     }
                 }
             }),
+            Drop::Game => widgets::popup(&ctx, "game_popup", pos, open.anchor.width().max(200.0), |ui| {
+                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                    let multi = &prefs.game_multi;
+                    let mut keys = vec!["All".to_owned()];
+                    keys.extend(lib.cats.sorted_keys());
+                    for key in keys {
+                        let label = if key == "All" { "All" } else { lib.cats.label(&key) };
+                        let count = if key == "All" { lib.videos.len() } else { lib.cats.counts.get(&key).copied().unwrap_or(0) };
+                        let mut row = Row::new(label).font(theme::font_tiny()).height(28.0).right_text(count.to_string());
+                        if multi.is_empty() {
+                            row = row.active(key == prefs.game_filter);
+                        } else {
+                            row = row.check(multi.contains(&key));
+                        }
+                        let r = row.show(ui);
+                        if r.clicked() {
+                            acts.push(GridAction::SelectGame(key.clone()));
+                            close = true;
+                        } else if r.secondary_clicked() {
+                            acts.push(GridAction::ToggleGameMulti(key.clone()));
+                        } else if r.middle_clicked() && key != "All" && key != NONE_KEY {
+                            acts.push(GridAction::RenameCategory(key.clone()));
+                            close = true;
+                        }
+                    }
+                });
+            }),
+            Drop::Date => {
+                let (w, _) = calendar_size();
+                let pos = Pos2::new((open.anchor.right() - w).max(0.0), open.anchor.bottom() + 3.0);
+                let mut changed = false;
+                let r = widgets::popup(&ctx, "date_popup", pos, w, |ui| {
+                    let (c, ch) = self.calendar(ui, lib);
+                    close = c;
+                    changed = ch;
+                });
+                if changed {
+                    acts.push(GridAction::ListChanged);
+                }
+                r
+            }
         };
-        if chosen {
+        if close {
             self.open = None;
-            acts.push(GridAction::ListChanged);
         } else if ctx.input(|i| i.pointer.any_pressed()) {
             if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
-                if !popup.contains(p) && !filter_rect.contains(p) && !sort_rect.contains(p) {
+                if !popup.contains(p) && !rects.iter().any(|(_, r)| r.contains(p)) {
                     self.open = None;
                 }
             }
         }
     }
 
-    fn toggle(&mut self, which: Drop, anchor: Rect) {
+    fn toggle(&mut self, which: Drop, anchor: Rect, lib: &Library) {
         self.open = match self.open {
             Some(o) if o.which == which => None,
             _ => Some(DropState { which, anchor }),
         };
+        if which == Drop::Date && self.open.is_some() {
+            let base = lib.date_from.unwrap_or_else(|| Local::now().date_naive());
+            self.cal_ym = (base.year(), base.month());
+            self.cal_year_open = false;
+        }
+    }
+
+    fn shift_month(&mut self, delta: i32) {
+        let (mut y, mut m) = (self.cal_ym.0, self.cal_ym.1 as i32 + delta);
+        while m < 1 {
+            m += 12;
+            y -= 1;
+        }
+        while m > 12 {
+            m -= 12;
+            y += 1;
+        }
+        self.cal_ym = (y, m as u32);
+        self.cal_year_open = false;
+    }
+
+    /// Python `_build_calendar`. Returns (close popup, filter changed).
+    fn calendar(&mut self, ui: &mut egui::Ui, lib: &mut Library) -> (bool, bool) {
+        let (mut close, mut changed) = (false, false);
+        let (y, m) = self.cal_ym;
+        let (a, b) = (lib.date_from, lib.date_to);
+        let today = Local::now().date_naive();
+        let have = lib.clip_dates();
+        let dim = Color32::from_rgb(0x6b, 0x6b, 0x88);
+        let range_bg = Color32::from_rgb(0x4a, 0x18, 0x30);
+        let range_hov = Color32::from_rgb(0x5e, 0x20, 0x40);
+        let (cw, chh) = (CAL_CELL.0, CAL_CELL.1);
+        let width = ui.available_width();
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+
+        // label-like button
+        let cell = |ui: &mut egui::Ui, size: Vec2, text: &str, fg: Color32, bg: Color32, hov: Color32, font: egui::FontId| -> egui::Response {
+            let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+            let fill = if resp.hovered() { hov } else { bg };
+            if fill != theme::card_bg() {
+                ui.painter().rect_filled(r, 0.0, fill);
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, fg);
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            resp
+        };
+
+        // header: < Month Year >
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            if cell(ui, Vec2::new(30.0, 22.0), "\u{2039}", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_bold()).clicked() {
+                self.shift_month(-1);
+            }
+            let month = NaiveDate::from_ymd_opt(y, m, 1).map(|d| d.format("%B").to_string()).unwrap_or_default();
+            let yr = format!("{y} {}", if self.cal_year_open { "\u{25b4}" } else { "\u{25be}" });
+            let mid_w = widgets::text_width(ui, &month, &theme::font_bold()) + 4.0 + widgets::text_width(ui, &yr, &theme::font_bold()) + 8.0;
+            let side = ((width - 60.0 - mid_w) / 2.0).max(0.0);
+            ui.add_space(side);
+            ui.label(egui::RichText::new(&month).font(theme::font_bold()).color(theme::text_primary()));
+            ui.add_space(4.0);
+            let yw = widgets::text_width(ui, &yr, &theme::font_bold()) + 8.0;
+            if cell(ui, Vec2::new(yw, 22.0), &yr, theme::text_primary(), theme::card_bg(), theme::card_hover(), theme::font_bold()).clicked() {
+                self.cal_year_open = !self.cal_year_open;
+            }
+            ui.add_space((width - 30.0 - ui.min_rect().width()).max(0.0));
+            if cell(ui, Vec2::new(30.0, 22.0), "\u{203a}", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_bold()).clicked() {
+                self.shift_month(1);
+            }
+        });
+        ui.add_space(4.0);
+
+        if self.cal_year_open {
+            // years with clips + this year + the shown year, newest first, 3 per row
+            let mut years: Vec<i32> = have.keys().map(|d| d.year()).chain([today.year(), y]).collect();
+            years.sort_unstable_by(|a, b| b.cmp(a));
+            years.dedup();
+            for row in years.chunks(3) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                    ui.add_space(((width - 3.0 * 66.0 - 4.0) / 2.0).max(0.0));
+                    for &yy in row {
+                        let sel = yy == y;
+                        let (fg, bg, font) = if sel { (theme::accent_fg(), theme::accent(), theme::font_bold()) } else { (theme::text_primary(), theme::card_bg(), theme::font_tiny()) };
+                        if cell(ui, Vec2::new(66.0, 24.0), &yy.to_string(), fg, bg, if sel { bg } else { theme::card_hover() }, font).clicked() {
+                            self.cal_ym = (yy, m);
+                            self.cal_year_open = false;
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+            }
+        } else {
+            let pad_x = ((width - 7.0 * (cw + 2.0)) / 2.0).max(0.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                ui.add_space(pad_x);
+                for wd in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+                    cell(ui, Vec2::new(cw, 20.0), wd, dim, theme::card_bg(), theme::card_bg(), theme::font_tiny());
+                }
+            });
+            for week in month_weeks(y, m) {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                    ui.add_space(pad_x);
+                    for d in week {
+                        let Some(d) = d else {
+                            ui.allocate_exact_size(Vec2::new(cw, chh), Sense::hover());
+                            continue;
+                        };
+                        let has = have.contains_key(&d);
+                        let (fg, bg, hov) = match (a, b) {
+                            (Some(a), Some(b)) if d == a || d == b => (theme::accent_fg(), theme::accent(), theme::accent()),
+                            (Some(a), Some(b)) if a < d && d < b => (theme::text_primary(), range_bg, range_hov),
+                            _ => (if d == today { theme::accent() } else if has { theme::text_primary() } else { dim }, theme::card_bg(), theme::card_hover()),
+                        };
+                        let font = if has { theme::font_bold() } else { theme::font_tiny() };
+                        if cell(ui, Vec2::new(cw, chh), &d.day().to_string(), fg, bg, hov, font).clicked() {
+                            // 1st click = start day (popup stays open), 2nd click = end day (any order)
+                            if lib.date_from.is_some() && lib.date_pending {
+                                let s = lib.date_from.unwrap();
+                                let (lo, hi) = if s <= d { (s, d) } else { (d, s) };
+                                lib.set_date_range(Some(lo), Some(hi), false);
+                                close = true;
+                            } else {
+                                lib.set_date_range(Some(d), Some(d), true);
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            let hint = if lib.date_pending {
+                "Now pick the end date".to_owned()
+            } else {
+                match (lib.date_from, lib.date_to) {
+                    (None, _) | (_, None) => "Pick a start date, then an end date".to_owned(),
+                    (Some(a), Some(b)) if a == b => "Click another day to make a range".to_owned(),
+                    (Some(a), Some(b)) => format!("{} days selected", (b - a).num_days() + 1),
+                }
+            };
+            ui.add_space(3.0);
+            ui.vertical_centered(|ui| ui.label(egui::RichText::new(hint).font(theme::font_tiny()).color(dim)));
+        }
+
+        // footer: shift a day back/forward, today, clear
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+            let bw = ((width - 6.0) / 4.0).floor();
+            // shift the whole selected range (or today) by `delta` days
+            let step = |lib: &mut Library, delta: i64| -> Option<NaiveDate> {
+                let a = lib.date_from.unwrap_or(today);
+                let b = lib.date_to.unwrap_or(a);
+                let td = chrono::Duration::days(delta);
+                let (a2, b2) = (a.checked_add_signed(td)?, b.checked_add_signed(td)?);
+                lib.set_date_range(Some(a2), Some(b2), false);
+                Some(a2)
+            };
+            let mut stepped = None;
+            if cell(ui, Vec2::new(bw, 22.0), "\u{2039} Day", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_tiny()).clicked() {
+                stepped = step(lib, -1);
+            }
+            if cell(ui, Vec2::new(bw, 22.0), "Today", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_tiny()).clicked() {
+                lib.set_date_range(Some(today), Some(today), false);
+                self.cal_ym = (today.year(), today.month());
+                changed = true;
+            }
+            if cell(ui, Vec2::new(bw, 22.0), "Day \u{203a}", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_tiny()).clicked() {
+                stepped = step(lib, 1);
+            }
+            if let Some(a2) = stepped {
+                self.cal_ym = (a2.year(), a2.month());
+                changed = true;
+            }
+            if cell(ui, Vec2::new(bw, 22.0), "Clear", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_tiny()).clicked() {
+                lib.set_date_range(None, None, false);
+                changed = true;
+                close = true;
+            }
+        });
+        ui.add_space(2.0);
+
+        // mouse wheel over the popup = previous/next month
+        if ui.ui_contains_pointer() {
+            let dy = ui.ctx().input(|i| i.raw_scroll_delta.y);
+            if dy != 0.0 {
+                self.shift_month(if dy > 0.0 { -1 } else { 1 });
+            }
+        }
+        (close, changed)
     }
 
     fn grid(&mut self, ui: &mut egui::Ui, lib: &mut Library, prefs: &Prefs, badges: &Badges, acts: &mut Vec<GridAction>) {
@@ -128,7 +446,8 @@ impl ClipGrid {
         if total == 0 {
             if lib.loaded_once || !prefs.checked_folders.is_empty() {
                 let r = ui.available_rect_before_wrap();
-                ui.painter().text(Pos2::new(r.left() + 10.0, r.top() + 30.0), Align2::LEFT_CENTER, if lib.loaded_once { lib.empty_msg() } else { "" }, theme::font_ui(), theme::text_muted());
+                let msg = if lib.loaded_once { lib.empty_msg() } else { String::new() };
+                ui.painter().text(Pos2::new(r.left() + 10.0, r.top() + 30.0), Align2::LEFT_CENTER, msg, theme::font_ui(), theme::text_muted());
             }
             return;
         }
