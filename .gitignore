@@ -1,0 +1,7 @@
+/target/
+Cargo.lock.bak
+*.dll
+*.exe
+*.mp4
+*.mkv
+.vscode/
