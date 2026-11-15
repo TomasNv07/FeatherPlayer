@@ -35,7 +35,7 @@ pub struct Player {
 
 impl Player {
     /// Load libmpv, init it and create the OpenGL render context.
-    pub fn start(cc: &eframe::CreationContext<'_>, lib: Option<PathBuf>) -> Result<Player, String> {
+    pub fn start(cc: &eframe::CreationContext<'_>, lib: Option<PathBuf>, volume: f64) -> Result<Player, String> {
         let gpa = cc.get_proc_address.ok_or("eframe gave no get_proc_address (is the glow renderer active?)")?;
         let mut cands = mpv::default_candidates();
         if let Some(l) = lib {
@@ -61,7 +61,7 @@ impl Player {
             pos: 0.0,
             paused: false,
             eof: false,
-            volume: 100.0,
+            volume: volume.clamp(0.0, 100.0),
             speed: 1.0,
             hold: None,
             tracks: Vec::new(),
@@ -70,7 +70,7 @@ impl Player {
             lavfi_cur: String::new(),
             msg: String::new(),
         };
-        let _ = p.core.set("volume", "100");
+        let _ = p.core.set("volume", &format!("{}", p.volume));
         Ok(p)
     }
 

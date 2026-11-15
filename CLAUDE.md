@@ -22,7 +22,8 @@ Step 1 (module split) done. Layout:
 - `player/`: `mod.rs` (`Player`: open, play/pause, seek, volume, speed, poll), `audio.rs` (tracks, `build_graph`, `apply_audio`), `video_gl.rs` (FBO + paint callback).
 - `ui/`: `widgets.rs` (seek bar, play button), `player_view.rs` (`PlayerView`: player screen layout and UI-only state), `fmt_time`.
 - `theme.rs`: colors and `apply()`.
-- `prefs.rs`, `scanner.rs`: empty placeholders for steps 2 and 3.
+- `prefs.rs` (step 2 done): `data_dir()` (with FeatherLauncher2 migration), `settings.json` (`read_settings`/`save_setting`, pretty JSON, tmp+rename), `Prefs` for `.clipplayer_prefs.json` (backup to `backups\prefs_*.json` before each save, keep 30, refuse accidental wipes, fall back to newest backup). Unknown/untyped keys are kept on save (Python drops unknown keys). `durations`, `trims` (floats 0..10000), `category_renames`, `keyword_groups` are still raw JSON: type them in their porting step. Volume is loaded from prefs (default 55) and prefs are saved on exit, like Python `on_close`. `cargo test -- --ignored real_prefs` checks the real file round-trips (read-only).
+- `scanner.rs`: empty placeholder for step 3.
 
 ## Architecture decisions (keep unless there is a good reason)
 - **GUI:** eframe/egui 0.33 with the **glow** (OpenGL) renderer. Needs Rust 1.88+.

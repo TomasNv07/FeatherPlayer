@@ -104,9 +104,7 @@ pub fn default_candidates() -> Vec<PathBuf> {
             v.extend(names.iter().map(|n| dir.join(n)));
         }
     }
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        v.push(PathBuf::from(home).join("FeatherPlayer").join("libmpv-2.dll"));
-    }
+    v.push(crate::prefs::data_dir().join("libmpv-2.dll"));
     v.extend(names.iter().map(PathBuf::from));
     v
 }

@@ -6,7 +6,7 @@
 //!   player  - playback state/control, audio tracks, video GL blit
 //!   ui      - widgets and views
 //!   theme   - colors and style
-//!   prefs   - settings and data folder (step 2)
+//!   prefs   - data folder, settings.json, clip prefs with backups
 //!   scanner - clip folder scanning and thumbnails (step 3)
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -14,7 +14,7 @@
 mod app;
 mod mpv;
 mod player;
-#[allow(dead_code)]
+#[allow(dead_code)] // API used by later porting steps
 mod prefs;
 #[allow(dead_code)]
 mod scanner;
