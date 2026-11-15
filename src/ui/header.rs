@@ -20,6 +20,8 @@ pub enum HeaderAction {
     Refresh,
     Categorize,
     ShowInFolder,
+    Compress,
+    ApplyTrim,
 }
 
 #[derive(Default)]
@@ -39,7 +41,8 @@ fn stat(ui: &mut egui::Ui, text: &str) {
 }
 
 impl Header {
-    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, prefs: &Prefs) -> Vec<HeaderAction> {
+    /// `trim_mode`: show the "Apply trim" pill (trim mode is on for the open clip).
+    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, prefs: &Prefs, trim_mode: bool) -> Vec<HeaderAction> {
         let mut acts = Vec::new();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -71,12 +74,16 @@ impl Header {
                     self.dropdown = Some(a);
                 }
                 ui.add_space(8.0);
-                // actions (right to left): Categorize | Show in folder | Refresh
+                // actions (right to left): Categorize | Show in folder | Compress | Refresh
                 widgets::pill_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         if Ghost::new("").icon("refresh", 18.0).padx(8.0).show(ui).on_hover_text("Refresh").clicked() {
                             acts.push(HeaderAction::Refresh);
+                        }
+                        widgets::pill_divider(ui);
+                        if Ghost::new("").icon("compress", 18.0).padx(8.0).show(ui).on_hover_text("Compress clips").clicked() {
+                            acts.push(HeaderAction::Compress);
                         }
                         widgets::pill_divider(ui);
                         if Ghost::new("").icon("folder", 18.0).padx(8.0).show(ui).on_hover_text("Show in folder").clicked() {
@@ -88,6 +95,14 @@ impl Header {
                         }
                     });
                 });
+                if trim_mode {
+                    ui.add_space(8.0);
+                    widgets::pill_frame().show(ui, |ui| {
+                        if Ghost::new("Apply trim").font(theme::font_bold()).fg(theme::text_primary()).padx(12.0).show(ui).on_hover_text("Cut the clip down to the trimmed part (permanent)").clicked() {
+                            acts.push(HeaderAction::ApplyTrim);
+                        }
+                    });
+                }
             });
         });
         if let Some(arrow) = self.dropdown {

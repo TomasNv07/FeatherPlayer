@@ -158,13 +158,52 @@ impl Player {
         self.eof = false;
     }
 
+    pub fn pause(&mut self) {
+        let _ = self.core.set("pause", "yes");
+        self.paused = true;
+    }
+
+    pub fn play(&mut self) {
+        let _ = self.core.set("pause", "no");
+        self.paused = false;
+    }
+
+    /// Python `_mpv_seek`: `seek <t> absolute` (exact with mpv's default hr-seek).
+    pub fn seek(&mut self, secs: f64) {
+        let t = secs.max(0.0);
+        let _ = self.core.cmd(&["seek", &format!("{t}"), "absolute"]);
+        self.pos = t;
+        self.hold = Some((Instant::now() + Duration::from_millis(400), t));
+    }
+
+    /// One frame back / forward, pausing first (Python `_frame_back` / `_frame_forward`).
+    pub fn frame_step(&mut self, back: bool) {
+        if !self.loaded {
+            return;
+        }
+        if self.playing() {
+            self.pause();
+        }
+        let _ = self.core.cmd(&[if back { "frame-back-step" } else { "frame-step" }]);
+        self.hold = None;
+    }
+
+    /// Unload the file (mpv lets go of it, e.g. before it is replaced on disk).
+    pub fn stop(&mut self) {
+        let _ = self.core.cmd(&["stop"]);
+        self.loaded = false;
+    }
+
     pub fn set_volume(&mut self, v: f64) {
         self.volume = v.clamp(0.0, 100.0);
         let _ = self.core.set("volume", &format!("{}", self.volume));
     }
 
+    /// Python `_apply_speed`: below 0.25x mpv's pitch-correcting stretcher mutes the audio,
+    /// so pitch correction is switched off there (0.1x then plays, at a lower pitch).
     pub fn set_speed(&mut self, s: f64) {
         self.speed = s;
+        let _ = self.core.set("audio-pitch-correction", if s >= 0.25 { "yes" } else { "no" });
         let _ = self.core.set("speed", &format!("{s}"));
     }
 

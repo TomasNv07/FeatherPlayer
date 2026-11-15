@@ -1,26 +1,50 @@
-//! Left side: video area, now-playing row and player controls, audio-track overlay,
-//! keyboard and drag&drop.
-//!
-//! The controls are still the proof-of-concept set (play, seek, speed, volume, audio tracks
-//! overlay) in the theme colours. The full FeatherPlayer controls (frame step, star/heart,
-//! trim slider, speed/audio menus) are ported in a later step.
+//! Left side: video area, now-playing row and the player controls (Python `_build_ui`
+//! controls): playback bar with trim handles, speed menu, trim and fullscreen buttons,
+//! star/heart, frame step + play/pause, volume. Plus keyboard, drag&drop and the audio-track
+//! overlay (from the proof of concept; Python's audio menu is ported later).
 
-use super::fmt_time;
 use super::header::no_video;
-use super::widgets::{play_button, seek_bar};
+use super::icons;
+use super::trim_slider::slim_slider;
+use super::widgets::{self, play_button};
+use crate::playback::Playback;
 use crate::player::Player;
-use crate::theme;
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense};
-use std::time::Duration;
+use crate::theme::{self, c};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Vec2};
+use std::time::{Duration, Instant};
 
-/// UI-only state of the player screen.
+/// Python `_SPEEDS`, `_SPEED_CELL_W`, `_SPEED_PAD`.
+pub const SPEEDS: [f64; 7] = [0.1, 0.25, 0.5, 1.0, 1.25, 1.5, 2.0];
+const SPEED_CELL_W: f32 = 38.0;
+const SPEED_PAD: f32 = 6.0;
+
+pub enum ViewAction {
+    ToggleStar,
+    ToggleLike,
+    ToggleTrim,
+    SetSpeed(f64),
+    /// A trim handle was let go: save [start, end] (0..10000).
+    TrimSaved(f64, f64),
+}
+
+/// What the controls need to know about the open clip.
+#[derive(Default)]
+pub struct ClipState {
+    pub open: bool,
+    pub starred: bool,
+    pub liked: bool,
+    pub trimmed: bool,
+}
+
 #[derive(Default)]
 pub struct PlayerView {
-    /// Seek-bar fraction while the pointer is held down on it.
-    scrub: Option<f32>,
     audio_menu: bool,
+    speed_menu: Option<Rect>,
     pub now_playing: String,
     pub now_playing_mb: String,
+    flash: Option<(String, Color32, Instant)>,
+    muted: bool,
+    pre_mute_vol: Option<f64>,
 }
 
 fn toggle_fullscreen(ctx: &egui::Context) {
@@ -28,9 +52,50 @@ fn toggle_fullscreen(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!cur));
 }
 
+fn is_fullscreen(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+}
+
+/// Python `_fmt`: m:ss.
+fn fmt(secs: f64) -> String {
+    let s = secs.max(0.0) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Round icon button with a hover circle (trim, fullscreen, star, heart, volume icon).
+fn round_btn(ui: &mut egui::Ui, size: Vec2, hover_r: f32) -> (egui::Response, bool) {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let hov = resp.hovered();
+    if hov {
+        ui.painter().circle_filled(rect.center(), hover_r, c("#242444"));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    (resp, hov)
+}
+
+/// Frame-step button (Python `_skip_btn`).
+fn skip_btn(ui: &mut egui::Ui, icon: &'static str, size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if resp.is_pointer_button_down_on() {
+        ui.painter().circle_filled(rect.center(), size / 2.0 - 1.0, c("#161628"));
+    } else if resp.hovered() {
+        ui.painter().circle_filled(rect.center(), size / 2.0 - 1.0, c("#2A2A4A"));
+    }
+    icons::paint(ui, rect.center(), icon, 18.0, c("#ffffff"), false, 1.9);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 impl PlayerView {
+    /// Small status message left of the clip size, gone after 3.5 s (Python `_flash_star_status`).
+    pub fn flash(&mut self, text: impl Into<String>, color: Color32) {
+        self.flash = Some((text.into(), color, Instant::now() + Duration::from_millis(3500)));
+    }
+
     /// Keyboard and dropped files. Call before the panels.
-    pub fn input(&mut self, ctx: &egui::Context, p: &mut Player) {
+    pub fn input(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback) {
         if let Some(f) = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone())) {
             p.open(&f.to_string_lossy());
             self.now_playing = crate::scanner::basename(&f.to_string_lossy()).to_owned();
@@ -41,7 +106,7 @@ impl PlayerView {
         }
         let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
         if key(egui::Key::Space) {
-            p.toggle_play();
+            pb.toggle_play(p);
         }
         if key(egui::Key::ArrowLeft) {
             p.seek_to(p.pos - 5.0);
@@ -50,65 +115,183 @@ impl PlayerView {
             p.seek_to(p.pos + 5.0);
         }
         if key(egui::Key::ArrowUp) {
-            p.set_volume(p.volume + 5.0);
+            self.set_volume(p, p.volume + 5.0);
         }
         if key(egui::Key::ArrowDown) {
-            p.set_volume(p.volume - 5.0);
+            self.set_volume(p, p.volume - 5.0);
         }
         if key(egui::Key::F) {
             toggle_fullscreen(ctx);
         }
     }
 
-    pub fn controls(&mut self, ctx: &egui::Context, p: &mut Player) {
+    /// Python `_set_volume`: moving the slider to 0 counts as muted, away from 0 unmutes.
+    fn set_volume(&mut self, p: &mut Player, v: f64) {
+        p.set_volume(v.round());
+        if p.volume > 0.0 && self.muted {
+            self.muted = false;
+        }
+        if p.volume == 0.0 && !self.muted {
+            self.muted = true;
+        }
+    }
+
+    /// Python `_toggle_mute`.
+    fn toggle_mute(&mut self, p: &mut Player) {
+        if self.muted {
+            let restore = self.pre_mute_vol.filter(|v| *v > 0.0).unwrap_or(50.0);
+            self.muted = false;
+            p.set_volume(restore);
+        } else {
+            self.pre_mute_vol = Some(p.volume);
+            self.muted = true;
+            p.set_volume(0.0);
+        }
+    }
+
+    pub fn controls(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback, clip: &ClipState) -> Vec<ViewAction> {
+        let mut acts = Vec::new();
+        if p.volume == 0.0 {
+            self.muted = true;
+        }
+        let mut speed_btn = Rect::NOTHING;
         egui::TopBottomPanel::bottom("controls").frame(egui::Frame::new().fill(theme::bg())).show_separator_line(false).show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            // now playing
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // ---- now playing: title left, (flash status) + size right ----
             ui.add_space(8.0);
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.add_space(18.0);
                 ui.label(egui::RichText::new(&self.now_playing).font(theme::font_bold()).color(theme::text_primary()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(18.0);
                     ui.label(egui::RichText::new(&self.now_playing_mb).font(theme::font_tiny()).color(theme::text_muted()));
+                    if let Some((t, col, until)) = &self.flash {
+                        if Instant::now() < *until {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(t).font(theme::font_tiny()).color(*col));
+                            ctx.request_repaint_after(*until - Instant::now());
+                        }
+                    }
                 });
             });
             ui.add_space(2.0);
-            // progress
-            let shown_pos = self.scrub.map(|f| f as f64 * p.dur).unwrap_or(p.pos);
+
+            // ---- progress row: time | bar | dur, speed, trim, fullscreen ----
             ui.horizontal(|ui| {
-                ui.add_space(18.0);
-                ui.add_sized([34.0, 30.0], egui::Label::new(egui::RichText::new(fmt_time(shown_pos)).font(theme::font_tiny()).color(theme::text_muted())));
-                let w = (ui.available_width() - 34.0 - 28.0).max(60.0);
-                let frac = if p.dur > 0.0 { (p.pos / p.dur) as f32 } else { 0.0 };
-                if let Some(f) = seek_bar(ui, w, frac.clamp(0.0, 1.0), p.dur > 0.0, &mut self.scrub) {
-                    p.seek_to(f as f64 * p.dur);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                ui.add_space(10.0 + 8.0);
+                let tl = ui.allocate_exact_size(Vec2::new(30.0, 34.0), Sense::hover()).0;
+                ui.painter().text(Pos2::new(tl.left(), tl.center().y), Align2::LEFT_CENTER, fmt(pb.shown_pos), theme::font_tiny(), theme::text_muted());
+                let right_w = 30.0 + (4.0 + 42.0) + (4.0 + 34.0) + (4.0 + 34.0) + 10.0;
+                let bar_w = (ui.available_width() - right_w - 16.0).max(60.0);
+                ui.add_space(8.0);
+                let evs = pb.bar.show(ui, bar_w, p.dur);
+                if let Some((s, e)) = pb.bar_events(evs, p) {
+                    acts.push(ViewAction::TrimSaved(s, e));
                 }
-                ui.add_sized([34.0, 30.0], egui::Label::new(egui::RichText::new(fmt_time(p.dur)).font(theme::font_tiny()).color(theme::text_muted())));
+                ui.add_space(8.0);
+                let dl = ui.allocate_exact_size(Vec2::new(30.0, 34.0), Sense::hover()).0;
+                ui.painter().text(Pos2::new(dl.right(), dl.center().y), Align2::RIGHT_CENTER, fmt(p.dur), theme::font_tiny(), theme::text_muted());
+
+                // speed: click = menu of speeds, right click = back to 1x
+                ui.add_space(4.0);
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(42.0, 34.0), Sense::click());
+                let hov = resp.hovered();
+                if hov {
+                    ui.painter().circle_filled(r.center(), 16.0, c("#242444"));
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let col = if p.speed != 1.0 { theme::accent() } else if hov { theme::text_primary() } else { theme::text_muted() };
+                ui.painter().text(r.center() - Vec2::new(1.0, 1.0), Align2::CENTER_CENTER, format!("{}x", fmt_speed(p.speed)), theme::font_pt(10.0), col);
+                speed_btn = r;
+                if resp.clicked() {
+                    self.speed_menu = if self.speed_menu.is_some() { None } else { Some(r) };
+                }
+                if resp.secondary_clicked() {
+                    acts.push(ViewAction::SetSpeed(1.0));
+                    self.speed_menu = None;
+                }
+
+                // trim: scissors, or x while trimmed
+                ui.add_space(4.0);
+                let (resp, hov) = round_btn(ui, Vec2::splat(34.0), 16.0);
+                if clip.trimmed {
+                    icons::paint(ui, resp.rect.center(), "x", 24.0, theme::accent(), false, 1.4);
+                } else {
+                    icons::paint(ui, resp.rect.center(), "scissors", 17.0, if hov { c("#bbbbbb") } else { theme::text_dim() }, false, 1.7);
+                }
+                if resp.clicked() && clip.open {
+                    acts.push(ViewAction::ToggleTrim);
+                }
+
+                // fullscreen
+                ui.add_space(4.0);
+                let (resp, hov) = round_btn(ui, Vec2::splat(34.0), 16.0);
+                let fs = is_fullscreen(ctx);
+                icons::paint(ui, resp.rect.center(), if fs { "fullscreen-exit" } else { "fullscreen" }, 18.0, if hov { theme::text_primary() } else { theme::text_dim() }, false, 1.8);
+                if resp.on_hover_text("Fullscreen (F)").clicked() {
+                    toggle_fullscreen(ctx);
+                }
             });
-            // transport row: speeds left, play centred, volume right
-            let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), Sense::hover());
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(egui::vec2(18.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            child.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-            for s in [0.5_f64, 1.0, 1.5, 2.0] {
-                let on = (p.speed - s).abs() < 0.01;
-                let txt = egui::RichText::new(format!("{s}x")).font(theme::font_pt(10.0)).color(if on { theme::accent() } else { theme::text_muted() });
-                if child.add(egui::Button::new(txt).frame(false)).clicked() {
-                    p.set_speed(s);
-                }
+
+            // ---- control row: star, heart | transport (centred) | volume ----
+            let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.0), Sense::hover());
+            let inner = row.shrink2(Vec2::new(18.0, 8.0));
+            let mut left = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            left.spacing_mut().item_spacing = Vec2::ZERO;
+            let (resp, hov) = round_btn(&mut left, Vec2::splat(34.0), 16.0);
+            let col = if clip.starred { c("#e8c84a") } else if hov { c("#bbbbbb") } else { theme::text_dim() };
+            icons::paint(&left, resp.rect.center(), "star", 20.0, col, clip.starred, 1.9);
+            if resp.clicked() && clip.open {
+                acts.push(ViewAction::ToggleStar);
             }
-            child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(format!("{}%", p.volume.round() as i64)).font(theme::font_tiny()).color(theme::text_muted()));
-                ui.spacing_mut().slider_width = 120.0;
-                let mut vol = p.volume;
-                if ui.add(egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false)).changed() {
-                    p.set_volume(vol);
-                }
-            });
-            let mut play = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(row.center(), egui::vec2(44.0, 44.0))));
-            if play_button(&mut play, p.playing()).clicked() && p.loaded {
-                p.toggle_play();
+            left.add_space(4.0);
+            let (resp, hov) = round_btn(&mut left, Vec2::splat(34.0), 16.0);
+            let col = if clip.liked { c("#e05555") } else if hov { c("#bbbbbb") } else { theme::text_dim() };
+            icons::paint(&left, resp.rect.center() + Vec2::new(0.0, 1.0), "heart", 20.0, col, clip.liked, 1.9);
+            if resp.clicked() && clip.open {
+                acts.push(ViewAction::ToggleLike);
             }
+
+            // volume (right)
+            let mut right = ui.new_child(egui::UiBuilder::new().max_rect(inner.shrink2(Vec2::new(0.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            right.spacing_mut().item_spacing = Vec2::ZERO;
+            right.add_space(7.0);
+            let pct = right.allocate_exact_size(Vec2::new(32.0, 20.0), Sense::hover()).0;
+            right.painter().text(Pos2::new(pct.right(), pct.center().y), Align2::RIGHT_CENTER, format!("{}%", p.volume.round() as i64), theme::font_tiny(), theme::text_muted());
+            right.add_space(4.0);
+            // the slider gets shorter instead of running into the centred buttons
+            let room = (inner.right() - 7.0 - 36.0 - 6.0 - 30.0) - (inner.center().x + 70.0);
+            let sw = room.clamp(40.0, 120.0);
+            let mut sl_ui = right.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(Pos2::new(pct.left() - 4.0 - sw, inner.top()), Pos2::new(pct.left() - 4.0, inner.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            if let Some(v) = slim_slider(&mut sl_ui, sw, p.volume, 100.0) {
+                self.set_volume(p, v);
+            }
+            right.add_space(sw + 6.0);
+            let (resp, _) = round_btn(&mut right, Vec2::splat(30.0), 14.0);
+            icons::paint(&right, resp.rect.center(), if self.muted { "mute" } else { "volume" }, 18.0, c("#ffffff"), false, 1.9);
+            if resp.clicked() {
+                self.toggle_mute(p);
+            }
+
+            // transport, dead centre: |< ( > ) >|
+            let tw = 30.0 + 6.0 + 44.0 + 6.0 + 30.0;
+            let t = Rect::from_center_size(row.center(), Vec2::new(tw, 44.0));
+            let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(t).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            tui.spacing_mut().item_spacing = Vec2::ZERO;
+            if skip_btn(&mut tui, "skip-prev", 30.0).clicked() {
+                p.frame_step(true);
+            }
+            tui.add_space(6.0);
+            if play_button(&mut tui, p.playing()).clicked() {
+                pb.toggle_play(p);
+            }
+            tui.add_space(6.0);
+            if skip_btn(&mut tui, "skip-next", 30.0).clicked() {
+                p.frame_step(false);
+            }
+
             if !p.msg.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(18.0);
@@ -117,10 +300,53 @@ impl PlayerView {
                 ui.add_space(4.0);
             }
         });
+
+        // speed menu: all speeds in one row, centred above the button
+        if let Some(anchor) = self.speed_menu {
+            let pw = SPEEDS.len() as f32 * SPEED_CELL_W + 2.0 * SPEED_PAD;
+            let ph = 30.0 + 2.0 * SPEED_PAD;
+            let screen = ctx.content_rect();
+            let x = (anchor.center().x - pw / 2.0).clamp(0.0, (screen.width() - pw).max(0.0));
+            let y = (anchor.top() - ph - 4.0).max(0.0);
+            let mut chosen = None;
+            let area = egui::Area::new(egui::Id::new("speed_menu")).fixed_pos(Pos2::new(x, y)).order(egui::Order::Foreground).show(ctx, |ui| {
+                egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, c("#52527e"))).corner_radius(10).inner_margin(egui::Margin::same(SPEED_PAD as i8)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        for s in SPEEDS {
+                            let (r, resp) = ui.allocate_exact_size(Vec2::new(SPEED_CELL_W, 30.0), Sense::click());
+                            let active = (s - p.speed).abs() < 1e-9;
+                            let hl = Rect::from_center_size(r.center(), Vec2::new(SPEED_CELL_W - 2.0, 26.0));
+                            if resp.hovered() {
+                                ui.painter().rect_filled(hl, 7.0, c("#2c2c50"));
+                            } else if active {
+                                ui.painter().rect_filled(hl, 7.0, c("#2A2A4A"));
+                            }
+                            let fg = if active { theme::accent() } else if resp.hovered() { Color32::WHITE } else { theme::text_muted() };
+                            ui.painter().text(r.center(), Align2::CENTER_CENTER, format!("{}x", fmt_speed(s)), theme::font_ui(), fg);
+                            if resp.clicked() {
+                                chosen = Some(s);
+                            }
+                        }
+                    });
+                });
+            });
+            if let Some(s) = chosen {
+                acts.push(ViewAction::SetSpeed(s));
+                self.speed_menu = None;
+            } else if ctx.input(|i| i.pointer.any_pressed()) {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    if !area.response.rect.contains(pos) && !speed_btn.contains(pos) {
+                        self.speed_menu = None;
+                    }
+                }
+            }
+        }
+        acts
     }
 
     /// Video area; returns its rectangle for overlays.
-    pub fn video(&mut self, ctx: &egui::Context, p: &mut Player) -> Rect {
+    pub fn video(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback) -> Rect {
         let mut video_rect = Rect::NOTHING;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::player_bg())).show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
@@ -131,14 +357,15 @@ impl PlayerView {
                 if resp.double_clicked() {
                     toggle_fullscreen(ctx);
                 } else if resp.clicked() {
-                    p.toggle_play();
+                    pb.toggle_play(p);
                 }
             } else {
                 no_video(ui, rect, if p.path.is_some() { "Loading\u{2026}" } else { "Select a clip to play" });
             }
         });
         if p.loaded && !p.paused {
-            ctx.request_repaint_after(Duration::from_millis(33));
+            // Python checks the trim end every 15 ms
+            ctx.request_repaint_after(Duration::from_millis(15));
         }
         video_rect
     }
@@ -169,13 +396,13 @@ impl PlayerView {
             .pivot(Align2::RIGHT_TOP)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                super::widgets::popup_frame().show(ui, |ui| {
+                widgets::popup_frame().show(ui, |ui| {
                     ui.set_width(300.0);
                     ui.label(egui::RichText::new("Tick several tracks to mix them").font(theme::font_tiny()).color(theme::text_dim()));
                     ui.add_space(4.0);
                     for i in 0..p.tracks.len() {
                         let on = p.sel.contains(&i);
-                        if super::widgets::Row::new(&p.tracks[i].label).check(on).show(ui).clicked() {
+                        if widgets::Row::new(&p.tracks[i].label).check(on).show(ui).clicked() {
                             if !on {
                                 p.sel.insert(i);
                             } else if p.sel.len() > 1 {
@@ -189,7 +416,6 @@ impl PlayerView {
         if changed {
             p.apply_audio();
         }
-        // click outside closes the menu
         if ctx.input(|i| i.pointer.any_pressed()) {
             if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                 if !menu.response.rect.contains(pos) && !btn.response.rect.contains(pos) {
@@ -198,4 +424,10 @@ impl PlayerView {
             }
         }
     }
+}
+
+/// Python `f"{spd:g}"`.
+pub fn fmt_speed(s: f64) -> String {
+    let t = format!("{s}");
+    t.strip_suffix(".0").map(str::to_owned).unwrap_or(t)
 }

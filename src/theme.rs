@@ -239,6 +239,12 @@ pub fn player_bg() -> Color32 { c("#000000") }
 pub fn bar_track() -> Color32 { c("#2A2A4A") }
 pub fn divider() -> Color32 { c("#2A2A3D") }
 pub fn border() -> Color32 { c("#2A2A3D") }
+/// Python `_mix_hex`: blend c1 towards c2 by t.
+pub fn mix(c1: Color32, c2: Color32, t: f32) -> Color32 {
+    let m = |a: u8, b: u8| ((a as f32 + (b as f32 - a as f32) * t).round_ties_even()).clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(m(c1.r(), c2.r()), m(c1.g(), c2.g()), m(c1.b(), c2.b()))
+}
+
 pub const ERROR: Color32 = Color32::from_rgb(0xe0, 0x55, 0x55);
 
 /// Readable text colour on top of the accent (Python `_accent_fg`).

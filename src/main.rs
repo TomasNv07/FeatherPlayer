@@ -9,11 +9,15 @@
 //!   prefs   - data folder, settings.json, clip prefs with backups
 //!   scanner - clip folder scanning, ffprobe durations, ffmpeg thumbnails
 //!   library - the clip list: sort, filter, visible count, selection
+//!   playback - trim mode / loop / seeking rules on top of the player
+//!   media   - ffmpeg jobs: apply trim, compress
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod library;
+mod media;
+mod playback;
 mod mpv;
 mod player;
 #[allow(dead_code)] // API used by later porting steps

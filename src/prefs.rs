@@ -276,6 +276,33 @@ impl Prefs {
         Some((a.first()?.as_f64()? / 10000.0, a.get(1)?.as_f64()? / 10000.0))
     }
 
+    fn raw_map_mut(&mut self, key: &str) -> &mut Map<String, Value> {
+        let d = self.raw.entry(key).or_insert_with(|| Value::Object(Map::new()));
+        if !d.is_object() {
+            *d = Value::Object(Map::new());
+        }
+        d.as_object_mut().unwrap()
+    }
+
+    /// Save a trim as [start, end] on the 0..10000 scale (floats, like Python).
+    pub fn set_trim(&mut self, path: &str, start: f64, end: f64) {
+        self.raw_map_mut("trims").insert(path.to_owned(), serde_json::json!([start, end]));
+    }
+
+    pub fn remove_trim(&mut self, path: &str) {
+        self.raw_map_mut("trims").shift_remove(path);
+    }
+
+    /// Raw [start, end] (0..10000) of a clip's trim.
+    pub fn trim_raw(&self, path: &str) -> Option<(f64, f64)> {
+        let a = self.raw.get("trims")?.as_object()?.get(path)?.as_array()?;
+        Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
+    }
+
+    pub fn remove_duration(&mut self, path: &str) {
+        self.raw_map_mut("durations").shift_remove(path);
+    }
+
     pub fn group(&self, key: &str) -> Option<&KeywordGroup> {
         self.keyword_groups.iter().find(|(k, _)| k == key).map(|(_, g)| g)
     }

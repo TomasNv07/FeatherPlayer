@@ -278,7 +278,8 @@ impl Library {
     }
 
     /// Take a finished scan. Returns the paths that are new since the previous list.
-    pub fn apply_scan(&mut self, r: ScanResult, prefs: &mut Prefs) -> Vec<String> {
+    /// `auto` = silent background refresh (Python `auto=True`): keeps the open clip and selection.
+    pub fn apply_scan(&mut self, r: ScanResult, prefs: &mut Prefs, auto: bool) -> Vec<String> {
         let prev: HashSet<String> = self.videos.iter().cloned().collect();
         let now = Local::now().naive_local();
         self.info.clear();
@@ -290,9 +291,17 @@ impl Library {
             self.info.insert(path, ClipInfo { sort_mtime, size, clip_dt, date_str, mb_str, ago_str });
         }
         self.loaded_once = true;
-        // a manual (non-auto) load clears the open clip and the selection
-        self.current = None;
-        self.selected.clear();
+        if auto {
+            let cur: HashSet<&String> = self.videos.iter().collect();
+            self.selected.retain(|s| cur.contains(s));
+            if self.current.as_ref().is_some_and(|c| !cur.contains(c)) {
+                self.current = None;
+            }
+        } else {
+            // a manual load clears the open clip and the selection
+            self.current = None;
+            self.selected.clear();
+        }
         self.total_size = Some(r.total_size);
         self.recompute_categories(prefs);
         self.cats.validate(prefs);
