@@ -2,6 +2,16 @@
 
 Port of FeatherPlayer (`reference/FeatherPlayer.py`, ~11.8k lines, one `VideoPlayerApp` class, Windows-only, fully custom-drawn tkinter UI) to Rust. The owner is Tomas; he works on two Windows PCs and syncs through this git repo, so everything important must live in the repo (this file, commit messages), not in chat history.
 
+## Context from the owner
+- Renamed: FeatherLauncher2 is now FeatherPlayer. Python keeps data in `%USERPROFILE%\FeatherPlayer` (it migrates the old FeatherLauncher2 folder itself). Rust must use the same folder and stay compatible with the existing settings, prefs and thumbnails.
+- Windows only. Full port with identical behavior, not a redesign. **Ask the owner before changing how a feature works.**
+- Distributed to friends as a PyInstaller build plus an Inno Setup installer, deliberately not via GitHub. Rust plan: single exe plus installer, bundling `libmpv-2.dll` and `ffmpeg.exe`. The Python `build.bat` must never be shared with end users.
+- Owner's clips: `.mkv`, 1080p h264, several audio tracks (game, mic, ...), so multi-track mixing must keep working. Test clips: `Z:\All clips\Clips`.
+- ClipSync is a separate Android app that plays clips copied to a phone. FeatherPlayer's phone sync feature for it gets ported later.
+- Two Windows PCs, synced only through this repo: `git pull` at the start of every session, commit and push at the end. Anything important goes in CLAUDE.md or commit messages, since chat history does not carry over.
+- Owner writes English and Finnish. Keep answers short and direct, and explain compile errors briefly.
+- `libmpv-2.dll` and `ffmpeg.exe` are not committed. libmpv lives in `%USERPROFILE%\FeatherPlayer\`.
+
 ## Status
 The proof of concept in `src/` is done and tested by the owner on Windows: video plays inside the egui window, speeds, audio track picking/mixing and playback all work. Nothing else is ported yet.
 
