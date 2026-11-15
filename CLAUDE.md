@@ -5,6 +5,15 @@ Port of FeatherPlayer (`reference/FeatherPlayer.py`, ~11.8k lines, one `VideoPla
 ## Status
 The proof of concept in `src/` is done and tested by the owner on Windows: video plays inside the egui window, speeds, audio track picking/mixing and playback all work. Nothing else is ported yet.
 
+Step 1 (module split) done. Layout:
+- `main.rs`: arg parsing (`[--lib path] [file]`), `run_native`.
+- `app.rs`: `FeatherApp` shell (owns `Player` + views, shutdown in `on_exit`).
+- `mpv.rs`: libmpv loader/wrapper.
+- `player/`: `mod.rs` (`Player`: open, play/pause, seek, volume, speed, poll), `audio.rs` (tracks, `build_graph`, `apply_audio`), `video_gl.rs` (FBO + paint callback).
+- `ui/`: `widgets.rs` (seek bar, play button), `player_view.rs` (`PlayerView`: player screen layout and UI-only state), `fmt_time`.
+- `theme.rs`: colors and `apply()`.
+- `prefs.rs`, `scanner.rs`: empty placeholders for steps 2 and 3.
+
 ## Architecture decisions (keep unless there is a good reason)
 - **GUI:** eframe/egui 0.33 with the **glow** (OpenGL) renderer. Needs Rust 1.88+.
 - **mpv:** `src/mpv.rs` loads libmpv at runtime with `libloading` (no import library, no linking setup). It uses the **OpenGL render API**, not a child window (`wid`), so egui popups and menus can draw over the video (no airspace problem).
