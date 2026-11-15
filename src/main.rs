@@ -11,6 +11,7 @@
 //!   library - the clip list: sort, filter, visible count, selection
 //!   playback - trim mode / loop / seeking rules on top of the player
 //!   media   - ffmpeg jobs: apply trim, compress
+//!   sync    - cloud folder sync, phone (ClipSync) sync, starred copy, Recycle Bin
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -23,6 +24,7 @@ mod player;
 #[allow(dead_code)] // API used by later porting steps
 mod prefs;
 mod scanner;
+mod sync;
 mod theme;
 mod ui;
 

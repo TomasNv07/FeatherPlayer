@@ -68,11 +68,15 @@ pub struct Ghost<'a> {
     pub accent_icon: bool,
     /// Fixed width (0 = from content).
     pub width: f32,
+    /// (hover fg, hover bg, pressed bg) instead of white / CARD_HOVER / #12121e.
+    pub hover: Option<(Color32, Color32, Color32)>,
+    /// Label left of the icon.
+    pub text_left: bool,
 }
 
 impl<'a> Ghost<'a> {
     pub fn new(text: &'a str) -> Self {
-        Ghost { text, icon: None, icon_size: 18.0, font: theme::font_ui(), fg: theme::text_muted(), padx: 12.0, arrow: false, accent_icon: false, width: 0.0 }
+        Ghost { text, icon: None, icon_size: 18.0, font: theme::font_ui(), fg: theme::text_muted(), padx: 12.0, arrow: false, accent_icon: false, width: 0.0, hover: None, text_left: false }
     }
     pub fn icon(mut self, name: &'static str, size: f32) -> Self {
         self.icon = Some(name);
@@ -103,6 +107,14 @@ impl<'a> Ghost<'a> {
         self.width = w;
         self
     }
+    pub fn hover_colors(mut self, fg: Color32, bg: Color32, press: Color32) -> Self {
+        self.hover = Some((fg, bg, press));
+        self
+    }
+    pub fn text_left(mut self) -> Self {
+        self.text_left = true;
+        self
+    }
 
     pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
         let h = CTRL_H - 4.0;
@@ -111,19 +123,23 @@ impl<'a> Ghost<'a> {
         let w = if self.width > 0.0 { self.width } else { base + self.padx * 2.0 + if self.arrow { 14.0 } else { 0.0 } };
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
         let state = if resp.is_pointer_button_down_on() { 2 } else if resp.hovered() { 1 } else { 0 };
-        let hover_bg = theme::card_hover();
-        let press_bg = c("#12121e");
+        let (hover_fg, hover_bg, press_bg) = self.hover.unwrap_or((Color32::WHITE, theme::card_hover(), c("#12121e")));
         let p = ui.painter();
         if state != 0 {
             p.rect_filled(rect, (RADIUS - 2.0).max(4.0), if state == 2 { press_bg } else { hover_bg });
         }
-        let col = if state == 0 { self.fg } else { Color32::WHITE };
+        let col = if state == 0 { self.fg } else { hover_fg };
         let icol = if self.accent_icon { theme::accent() } else { col };
         let cy = rect.center().y;
         if let (Some(icon), false) = (self.icon, self.text.is_empty()) {
             let x0 = rect.left() + (w - (self.icon_size + 8.0 + tw)) / 2.0;
-            icons::paint(ui, Pos2::new(x0 + self.icon_size / 2.0, cy), icon, self.icon_size, icol, false, 1.9);
-            ui.painter().text(Pos2::new(x0 + self.icon_size + 8.0, cy), egui::Align2::LEFT_CENTER, self.text, self.font, col);
+            if self.text_left {
+                ui.painter().text(Pos2::new(x0, cy), egui::Align2::LEFT_CENTER, self.text, self.font, col);
+                icons::paint(ui, Pos2::new(x0 + tw + 8.0 + self.icon_size / 2.0, cy), icon, self.icon_size, icol, false, 1.9);
+            } else {
+                icons::paint(ui, Pos2::new(x0 + self.icon_size / 2.0, cy), icon, self.icon_size, icol, false, 1.9);
+                ui.painter().text(Pos2::new(x0 + self.icon_size + 8.0, cy), egui::Align2::LEFT_CENTER, self.text, self.font, col);
+            }
         } else if let Some(icon) = self.icon {
             icons::paint(ui, rect.center(), icon, self.icon_size, icol, false, 1.9);
         } else if self.arrow {

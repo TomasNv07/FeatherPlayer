@@ -20,6 +20,8 @@ const SPEED_PAD: f32 = 6.0;
 
 pub enum ViewAction {
     ToggleStar,
+    /// Right click on the star: pick the starred-clips folder.
+    ChooseStarFolder,
     ToggleLike,
     ToggleTrim,
     SetSpeed(f64),
@@ -245,6 +247,9 @@ impl PlayerView {
             icons::paint(&left, resp.rect.center(), "star", 20.0, col, clip.starred, 1.9);
             if resp.clicked() && clip.open {
                 acts.push(ViewAction::ToggleStar);
+            }
+            if resp.secondary_clicked() {
+                acts.push(ViewAction::ChooseStarFolder);
             }
             left.add_space(4.0);
             let (resp, hov) = round_btn(&mut left, Vec2::splat(34.0), 16.0);

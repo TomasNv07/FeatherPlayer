@@ -308,6 +308,7 @@ impl CategorizeDialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
     Yes,
+    Extra,
     Extra2,
     No,
 }
@@ -318,14 +319,29 @@ pub struct ConfirmDialog {
     pub details: Vec<String>,
     pub note: String,
     pub yes_text: String,
-    /// Optional neutral button left of the confirm button.
+    /// Optional dark red button left of the confirm button (result `Extra`).
+    pub extra_text: Option<String>,
+    /// Optional button left of that (result `Extra2`), neutral or dark red.
     pub extra2_text: Option<String>,
+    pub extra2_neutral: bool,
+    /// "+ N more" under the details.
+    pub more: usize,
+    /// kind="error": amber, only an OK button.
+    pub error: bool,
+}
+
+impl Default for ConfirmDialog {
+    fn default() -> Self {
+        ConfirmDialog { title: String::new(), head: String::new(), details: Vec::new(), note: String::new(), yes_text: "Delete".into(), extra_text: None, extra2_text: None, extra2_neutral: false, more: 0, error: false }
+    }
 }
 
 impl ConfirmDialog {
     /// Returns Some(choice) once a button (or Escape / the x) was used.
     pub fn show(&self, ctx: &egui::Context) -> Option<Confirm> {
         let red = egui::Color32::from_rgb(0xe8, 0x45, 0x4a);
+        let amber = egui::Color32::from_rgb(0xe8, 0xc8, 0x4a);
+        let tone = if self.error { amber } else { red };
         let mut res = None;
         let frame = egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, theme::border())).corner_radius(8).inner_margin(egui::Margin::ZERO);
         let resp = egui::Modal::new(egui::Id::new("confirm_dialog")).frame(frame).show(ctx, |ui| {
@@ -348,10 +364,10 @@ impl ConfirmDialog {
             egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 20)).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     let (b, _) = ui.allocate_exact_size(Vec2::splat(46.0), egui::Sense::hover());
-                    ui.painter().rect_filled(b, 14.0, theme::mix(theme::card_bg(), red, 0.45));
-                    ui.painter().rect_filled(b.shrink(1.0), 13.0, theme::mix(theme::card_bg(), red, 0.16));
-                    let icon = if self.yes_text == "Delete" { "trash" } else { "alert" };
-                    super::icons::paint(ui, b.center(), icon, 22.0, red, false, 1.9);
+                    ui.painter().rect_filled(b, 14.0, theme::mix(theme::card_bg(), tone, 0.45));
+                    ui.painter().rect_filled(b.shrink(1.0), 13.0, theme::mix(theme::card_bg(), tone, 0.16));
+                    let icon = if !self.error && self.yes_text == "Delete" { "trash" } else { "alert" };
+                    super::icons::paint(ui, b.center(), icon, 22.0, tone, false, 1.9);
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
                         ui.set_width(340.0);
@@ -363,6 +379,10 @@ impl ConfirmDialog {
                                 for d in &self.details {
                                     let t = widgets::ellipsize(ui, d, &theme::font_ui(), 310.0, true);
                                     ui.label(egui::RichText::new(t).font(theme::font_ui()).color(theme::text_muted()));
+                                }
+                                if self.more > 0 {
+                                    ui.add_space(3.0);
+                                    ui.label(egui::RichText::new(format!("+ {} more", self.more)).font(theme::font_tiny()).color(theme::text_dim()));
                                 }
                             });
                         }
@@ -377,6 +397,12 @@ impl ConfirmDialog {
             ui.painter().rect_filled(d, 0.0, theme::divider());
             egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.error {
+                        if rounded_button(ui, "OK", theme::text_primary(), c("#242444"), c("#2A2A4A"), theme::font_ui(), 18.0, 7.0).clicked() {
+                            res = Some(Confirm::No);
+                        }
+                        return;
+                    }
                     if rounded_button(ui, "Cancel", theme::text_primary(), c("#242444"), c("#2A2A4A"), theme::font_ui(), 16.0, 7.0).clicked() {
                         res = Some(Confirm::No);
                     }
@@ -384,16 +410,24 @@ impl ConfirmDialog {
                     if rounded_button(ui, &self.yes_text, egui::Color32::WHITE, egui::Color32::from_rgb(0xc9, 0x35, 0x3c), red, theme::font_bold(), 18.0, 7.0).clicked() {
                         res = Some(Confirm::Yes);
                     }
+                    let dark_red = (egui::Color32::from_rgb(0x8f, 0x2a, 0x30), egui::Color32::from_rgb(0xc9, 0x35, 0x3c));
+                    if let Some(t) = &self.extra_text {
+                        ui.add_space(8.0);
+                        if rounded_button(ui, t, egui::Color32::WHITE, dark_red.0, dark_red.1, theme::font_bold(), 16.0, 7.0).clicked() {
+                            res = Some(Confirm::Extra);
+                        }
+                    }
                     if let Some(t) = &self.extra2_text {
                         ui.add_space(8.0);
-                        if rounded_button(ui, t, egui::Color32::WHITE, c("#2f2f58"), c("#3a3a6a"), theme::font_bold(), 16.0, 7.0).clicked() {
+                        let (b, h) = if self.extra2_neutral { (c("#2f2f58"), c("#3a3a6a")) } else { dark_red };
+                        if rounded_button(ui, t, egui::Color32::WHITE, b, h, theme::font_bold(), 16.0, 7.0).clicked() {
                             res = Some(Confirm::Extra2);
                         }
                     }
                 });
             });
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                res = Some(Confirm::Yes);
+                res = Some(if self.error { Confirm::No } else { Confirm::Yes });
             }
         });
         if res.is_none() && resp.should_close() {

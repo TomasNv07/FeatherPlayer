@@ -28,6 +28,8 @@ pub enum MediaMsg {
     CompressedOne(String, bool, Option<String>),
     /// The compress batch is over: (done, failed names, cancelled).
     CompressDone(usize, Vec<String>, bool),
+    /// Show a flash status message (text, rgb).
+    Flash(String, [u8; 3]),
 }
 
 fn hidden(cmd: &mut Command) -> &mut Command {

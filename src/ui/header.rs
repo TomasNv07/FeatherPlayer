@@ -22,6 +22,8 @@ pub enum HeaderAction {
     ShowInFolder,
     Compress,
     ApplyTrim,
+    Delete,
+    Settings,
 }
 
 #[derive(Default)]
@@ -74,10 +76,14 @@ impl Header {
                     self.dropdown = Some(a);
                 }
                 ui.add_space(8.0);
-                // actions (right to left): Categorize | Show in folder | Compress | Refresh
+                // actions (right to left): Delete | Categorize | Show in folder | Compress | Refresh | Settings
                 widgets::pill_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        if Ghost::new("").icon("gear", 18.0).padx(8.0).show(ui).on_hover_text("Settings").clicked() {
+                            acts.push(HeaderAction::Settings);
+                        }
+                        widgets::pill_divider(ui);
                         if Ghost::new("").icon("refresh", 18.0).padx(8.0).show(ui).on_hover_text("Refresh").clicked() {
                             acts.push(HeaderAction::Refresh);
                         }
@@ -92,6 +98,23 @@ impl Header {
                         widgets::pill_divider(ui);
                         if Ghost::new("").icon("plus", 18.0).padx(8.0).show(ui).on_hover_text("Categorize clips").clicked() {
                             acts.push(HeaderAction::Categorize);
+                        }
+                        widgets::pill_divider(ui);
+                        // delete: number of selected clips beside the icon, red on hover
+                        let n = lib.selected.len();
+                        let count = if n >= 1 { n.to_string() } else { String::new() };
+                        let card = theme::card_bg();
+                        let red = egui::Color32::from_rgb(0xff, 0x44, 0x55);
+                        let r = Ghost::new(&count)
+                            .icon("trash", 18.0)
+                            .padx(8.0)
+                            .font(theme::font_bold())
+                            .text_left()
+                            .hover_colors(egui::Color32::from_rgb(0xff, 0x8a, 0x94), theme::mix(card, red, 0.22), theme::mix(card, red, 0.10))
+                            .show(ui)
+                            .on_hover_text("Delete selected clips");
+                        if r.clicked() {
+                            acts.push(HeaderAction::Delete);
                         }
                     });
                 });

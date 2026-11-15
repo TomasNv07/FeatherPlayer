@@ -6,11 +6,13 @@ use crate::playback::Playback;
 use crate::player::{Player, Start};
 use crate::prefs::{self, JsonGet, Prefs};
 use crate::scanner::{self, Msg, Scanner};
+use crate::sync::{self, Cloud, Phone, PhoneSnap};
 use crate::theme::{self, c};
 use crate::ui::clip_grid::{Badges, ClipGrid, GridAction};
 use crate::ui::dialogs::{CategorizeDialog, CompressAction, CompressDialog, Confirm, ConfirmDialog, RenameDialog};
 use crate::ui::header::{Header, HeaderAction};
 use crate::ui::player_view::{ClipState, PlayerView, ViewAction, SPEEDS};
+use crate::ui::settings::{SettingsAction, SettingsPage, SettingsValues};
 use eframe::{egui, glow};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -54,6 +56,17 @@ pub struct FeatherApp {
     compress: Option<(CompressDialog, CompressCtl)>,
     media_tx: Sender<MediaMsg>,
     media_rx: Receiver<MediaMsg>,
+    egui_ctx: egui::Context,
+    cloud: Cloud,
+    phone: Phone,
+    settings: SettingsPage,
+    settings_open: bool,
+    settings_seen: bool,
+    recycle_bin: bool,
+    /// Delete question: (dialog, clips, clip -> its cloud copy).
+    confirm_delete: Option<(ConfirmDialog, Vec<String>, HashMap<String, Option<String>>)>,
+    confirm_cloud_delete: Option<ConfirmDialog>,
+    error_dialog: Option<ConfirmDialog>,
 }
 
 /// Folder from a dialog, written like Tk's askdirectory ("Z:/All clips/Clips"), since folder
@@ -105,6 +118,16 @@ impl FeatherApp {
             compress: None,
             media_tx,
             media_rx,
+            egui_ctx: cc.egui_ctx.clone(),
+            cloud: Cloud::new(cc.egui_ctx.clone()),
+            phone: Phone::new(),
+            settings: SettingsPage::default(),
+            settings_open: false,
+            settings_seen: false,
+            recycle_bin: st.get_bool("recycle_bin", true),
+            confirm_delete: None,
+            confirm_cloud_delete: None,
+            error_dialog: None,
             prefs,
         };
         app.load_folders(false);
@@ -189,6 +212,7 @@ impl FeatherApp {
 
     fn media_message(&mut self, m: MediaMsg) {
         match m {
+            MediaMsg::Flash(t, [r, g, b]) => self.view.flash(t, egui::Color32::from_rgb(r, g, b)),
             MediaMsg::ReleaseFile(path) => {
                 if let Ok(p) = &mut self.player {
                     if p.path.as_deref() == Some(path.as_str()) {
@@ -346,18 +370,37 @@ impl FeatherApp {
 
     fn view_action(&mut self, a: ViewAction) {
         let Some(path) = self.lib.current.clone() else {
-            if let (ViewAction::SetSpeed(s), Ok(p)) = (a, &mut self.player) {
-                p.set_speed(s);
+            match a {
+                ViewAction::SetSpeed(s) => {
+                    if let Ok(p) = &mut self.player {
+                        p.set_speed(s);
+                    }
+                }
+                ViewAction::ChooseStarFolder => {
+                    self.choose_star_folder(true);
+                }
+                _ => {}
             }
             return;
         };
         match a {
             ViewAction::ToggleStar => {
-                // copying starred clips to a folder comes with the cloud-sync step
-                if !self.prefs.starred.remove(&path) {
-                    self.prefs.starred.insert(path);
+                // Python `_toggle_star`: save first, then copy to the starred-clips folder
+                let newly = !self.prefs.starred.remove(&path);
+                if newly {
+                    self.prefs.starred.insert(path.clone());
                 }
                 self.prefs.save();
+                if newly && self.prefs.star_copy_enabled {
+                    let folder = self.choose_star_folder(false);
+                    if !folder.is_empty() {
+                        let trim = if self.prefs.trim_enabled.contains(&path) { self.prefs.trim_raw(&path) } else { None };
+                        sync::copy_starred(path, folder, trim, scanner::find_ffmpeg(), self.media_tx.clone(), self.egui_ctx.clone());
+                    }
+                }
+            }
+            ViewAction::ChooseStarFolder => {
+                self.choose_star_folder(true);
             }
             ViewAction::ToggleLike => {
                 if !self.prefs.liked.remove(&path) {
@@ -422,6 +465,8 @@ impl FeatherApp {
             note: "Apply trim deletes the parts outside the trim from the file and can't be undone. Save as copy keeps the original clip and makes a new trimmed clip next to it.".into(),
             yes_text: "Apply trim".into(),
             extra2_text: Some("Save as copy".into()),
+            extra2_neutral: true,
+            ..Default::default()
         };
         self.confirm_trim = Some((d, path));
     }
@@ -504,8 +549,252 @@ impl FeatherApp {
             }
             HeaderAction::Compress => self.open_compress(),
             HeaderAction::ApplyTrim => self.ask_apply_trim(),
+            HeaderAction::Delete => self.ask_delete(),
+            HeaderAction::Settings => {
+                if !self.settings_seen {
+                    // Python pauses when the page is first built
+                    self.settings_seen = true;
+                    if let Ok(p) = &mut self.player {
+                        if p.playing() {
+                            p.pause();
+                        }
+                    }
+                }
+                self.settings_open = true;
+            }
         }
         let _ = ctx;
+    }
+
+    /// Python `_choose_star_folder`: the starred-clips folder, asking for it when none is set
+    /// (or it is gone). `force` always asks (right click on the star).
+    fn choose_star_folder(&mut self, force: bool) -> String {
+        let cur = self.prefs.star_copy_folder.clone();
+        if !cur.is_empty() && !force {
+            if std::path::Path::new(&cur).is_dir() {
+                return cur;
+            }
+            self.view.flash("Folder missing \u{2014} choose it again", RED);
+        }
+        let mut dlg = rfd::FileDialog::new().set_title("Choose a folder for starred clips");
+        if std::path::Path::new(&cur).is_dir() {
+            dlg = dlg.set_directory(&cur);
+        }
+        if let Some(p) = dlg.pick_folder() {
+            let path = p.to_string_lossy().into_owned();
+            self.prefs.star_copy_folder = path.clone();
+            self.prefs.save();
+            self.view.flash(format!("Starred clips folder: {}", scanner::basename(&path)), GREEN);
+        }
+        self.prefs.star_copy_folder.clone()
+    }
+
+    /// Python `_delete_selected` (the question).
+    fn ask_delete(&mut self) {
+        let names: Vec<String> = if !self.lib.selected.is_empty() {
+            self.lib.selected.iter().cloned().collect()
+        } else if let Some(c) = &self.lib.current {
+            vec![c.clone()]
+        } else {
+            self.view.flash("Open or select a clip to delete first", YELLOW);
+            return;
+        };
+        let n = names.len();
+        let noun = if n == 1 { "clip" } else { "clips" };
+        let total: u64 = names.iter().filter_map(|x| std::fs::metadata(x).ok()).map(|m| m.len()).sum();
+        let size_txt = if total >= 1 << 30 { format!("{:.2} GB", total as f64 / (1u64 << 30) as f64) } else { format!("{:.1} MB", total as f64 / (1u64 << 20) as f64) };
+        let (head, mut note) = if self.recycle_bin {
+            let n_perm = names.iter().filter(|x| !sync::can_recycle(x)).count();
+            let note = if n_perm > 0 {
+                format!("{n_perm} of them {} on a drive without a Recycle Bin and will be deleted permanently.", if n_perm == 1 { "is" } else { "are" })
+            } else {
+                "You can restore them from the Recycle Bin.".to_owned()
+            };
+            (format!("Move {n} {noun} ({size_txt}) to the Recycle Bin?"), note)
+        } else {
+            (format!("Permanently delete {n} {noun} ({size_txt})?"), "This can't be undone.".to_owned())
+        };
+        let cloud_map: HashMap<String, Option<String>> = names.iter().map(|x| (x.clone(), self.cloud.copy_of(x))).collect();
+        let n_cloud = cloud_map.values().filter(|v| v.is_some()).count();
+        if n_cloud > 0 {
+            let extra = if n_cloud == n {
+                format!("{} a copy in your cloud folder.", if n == 1 { "It also has" } else { "They also have" })
+            } else {
+                format!("{n_cloud} of them also {} a copy in your cloud folder.", if n_cloud == 1 { "has" } else { "have" })
+            };
+            note = format!("{note}\n{extra}");
+        }
+        let d = ConfirmDialog {
+            title: "Delete clips".into(),
+            head,
+            details: names.iter().take(8).map(|x| scanner::basename(x).to_owned()).collect(),
+            more: n.saturating_sub(8),
+            note,
+            yes_text: "Delete".into(),
+            extra_text: (n_cloud > 0).then(|| "Delete + from cloud".into()),
+            extra2_text: (n_cloud > 0).then(|| "Only from cloud".into()),
+            ..Default::default()
+        };
+        self.confirm_delete = Some((d, names, cloud_map));
+    }
+
+    /// Python `_delete_selected` (after the answer) / `_delete_cloud_copies_only`.
+    fn do_delete(&mut self, choice: Confirm, names: Vec<String>, cloud_map: HashMap<String, Option<String>>) {
+        let mut errors = Vec::new();
+        if choice == Confirm::Extra2 {
+            let mut done = 0;
+            for path in &names {
+                let Some(Some(target)) = cloud_map.get(path) else { continue };
+                match std::fs::remove_file(target) {
+                    Ok(()) => {
+                        self.cloud.mark_removed(path);
+                        done += 1;
+                    }
+                    Err(e) => errors.push(format!("{} (cloud copy): {e}", scanner::basename(path))),
+                }
+            }
+            self.lib.selected.clear();
+            if errors.is_empty() {
+                self.view.flash(format!("Removed {done} cloud cop{}", if done == 1 { "y" } else { "ies" }), GREEN);
+            } else {
+                self.error_dialog = Some(error_dialog("Some cloud copies couldn't be deleted.", errors));
+            }
+            self.load_folders(false);
+            return;
+        }
+        let with_cloud = choice == Confirm::Extra;
+        // mpv keeps the open clip locked: let go of it before deleting
+        if let (Ok(p), Some(cur)) = (&mut self.player, &self.lib.current) {
+            if names.contains(cur) {
+                p.stop();
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }
+        for path in &names {
+            // the thumbnail name depends on size/date: work it out before the file goes
+            let thumb = scanner::cache_key(path).map(|k| scanner::cache_dir().join(k));
+            let res = if self.recycle_bin && sync::can_recycle(path) {
+                if sync::recycle_file(path) { Ok(()) } else { Err("could not move it to the Recycle Bin".to_owned()) }
+            } else {
+                std::fs::remove_file(path).map_err(|e| e.to_string())
+            };
+            if let Err(e) = res {
+                errors.push(format!("{}: {e}", scanner::basename(path)));
+                continue;
+            }
+            if let Some(t) = thumb {
+                let _ = std::fs::remove_file(t);
+            }
+            if let (true, Some(Some(target))) = (with_cloud, cloud_map.get(path)) {
+                match std::fs::remove_file(target) {
+                    Ok(()) => self.cloud.forget(path),
+                    Err(e) => errors.push(format!("{} (cloud copy): {e}", scanner::basename(path))),
+                }
+            }
+        }
+        self.lib.selected.clear();
+        if !errors.is_empty() {
+            self.error_dialog = Some(error_dialog("Some clips couldn't be deleted.", errors));
+        }
+        self.load_folders(false);
+    }
+
+    fn settings_action(&mut self, ctx: &egui::Context, a: SettingsAction) {
+        match a {
+            SettingsAction::Close => self.settings_open = false,
+            SettingsAction::StarCopy(on) => {
+                self.prefs.star_copy_enabled = on;
+                self.prefs.save();
+            }
+            SettingsAction::ChooseStarFolder => {
+                let mut dlg = rfd::FileDialog::new().set_title("Choose a folder for starred clips");
+                if std::path::Path::new(&self.prefs.star_copy_folder).is_dir() {
+                    dlg = dlg.set_directory(&self.prefs.star_copy_folder);
+                }
+                if let Some(p) = dlg.pick_folder() {
+                    self.prefs.star_copy_folder = p.to_string_lossy().into_owned();
+                    self.prefs.save();
+                }
+            }
+            SettingsAction::CloudToggle(on) => {
+                // turning it on needs a folder first
+                if on && !std::path::Path::new(&self.cloud.folder).is_dir() && !self.choose_cloud_folder() {
+                    return;
+                }
+                self.cloud.set_enabled(on);
+            }
+            SettingsAction::ChooseCloudFolder => {
+                self.choose_cloud_folder();
+            }
+            SettingsAction::CloudMode(m) => self.cloud.set_mode(m),
+            SettingsAction::CloudGame(k) => self.cloud.pick_game(&k),
+            SettingsAction::CloudSync => {
+                let folders = self.prefs.checked_folders.clone();
+                if !self.cloud.sync_now(&folders, &self.prefs.keyword_groups) && self.choose_cloud_folder() {
+                    self.cloud.sync_now(&folders, &self.prefs.keyword_groups);
+                }
+            }
+            SettingsAction::CloudDeleteAll => match self.cloud.count_cloud_clips() {
+                Err(e) => self.cloud.set_status(&e, true),
+                Ok(0) => self.cloud.set_status("No clips in the cloud folder", true),
+                Ok(n) => {
+                    self.confirm_cloud_delete = Some(ConfirmDialog {
+                        title: "Delete cloud clips".into(),
+                        head: format!("Delete all {n} clip{} in the cloud folder?", if n == 1 { "" } else { "s" }),
+                        note: "Your original clips are not touched. This can't be undone.".into(),
+                        ..Default::default()
+                    });
+                }
+            },
+            SettingsAction::PhoneToggle(on) => self.phone.set_enabled(on),
+            SettingsAction::PhoneKind(k) => self.phone.toggle_kind(k),
+            SettingsAction::PhoneSync => {
+                let p = &self.prefs;
+                let trims = p.trim_enabled.iter().filter_map(|t| p.trim_raw(t).map(|r| (t.clone(), r))).collect();
+                let snap = PhoneSnap {
+                    kinds: self.phone.kinds.clone(),
+                    starred: p.starred.clone(),
+                    liked: p.liked.clone(),
+                    trim_enabled: p.trim_enabled.clone(),
+                    trims,
+                    folders: p.checked_folders.clone(),
+                    groups: p.keyword_groups.clone(),
+                    labels: self.lib.cats.norm_map.clone(),
+                };
+                self.phone.sync_now(snap, scanner::find_ffmpeg(), ctx.clone());
+            }
+            SettingsAction::Loop(on) => {
+                self.pb.loop_clip = on;
+                prefs::save_setting("loop_clip", Value::Bool(on));
+            }
+            SettingsAction::StartAlways(on) => {
+                self.start_always = on;
+                prefs::save_setting("always_start_beginning", Value::Bool(on));
+            }
+            SettingsAction::TrimGpu(on) => {
+                self.trim_gpu = on;
+                prefs::save_setting("trim_use_gpu", Value::Bool(on));
+            }
+            SettingsAction::RecycleBin(on) => {
+                self.recycle_bin = on;
+                prefs::save_setting("recycle_bin", Value::Bool(on));
+            }
+        }
+    }
+
+    /// Python `_choose_cloud_folder`. False if cancelled.
+    fn choose_cloud_folder(&mut self) -> bool {
+        let mut dlg = rfd::FileDialog::new().set_title("Choose your cloud folder (e.g. Google Drive)");
+        if std::path::Path::new(&self.cloud.folder).is_dir() {
+            dlg = dlg.set_directory(&self.cloud.folder);
+        }
+        match dlg.pick_folder() {
+            Some(p) => {
+                self.cloud.set_folder(p.to_string_lossy().into_owned());
+                true
+            }
+            None => false,
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -530,8 +819,29 @@ impl FeatherApp {
                 match choice {
                     Confirm::Yes => self.start_trim(ctx, path, false),
                     Confirm::Extra2 => self.start_trim(ctx, path, true),
-                    Confirm::No => {}
+                    Confirm::Extra | Confirm::No => {}
                 }
+            }
+        }
+        if let Some((d, _, _)) = &self.confirm_delete {
+            if let Some(choice) = d.show(ctx) {
+                let (_, names, map) = self.confirm_delete.take().unwrap();
+                if choice != Confirm::No {
+                    self.do_delete(choice, names, map);
+                }
+            }
+        }
+        if let Some(d) = &self.confirm_cloud_delete {
+            if let Some(choice) = d.show(ctx) {
+                self.confirm_cloud_delete = None;
+                if choice == Confirm::Yes {
+                    self.cloud.delete_all();
+                }
+            }
+        }
+        if let Some(d) = &self.error_dialog {
+            if d.show(ctx).is_some() {
+                self.error_dialog = None;
             }
         }
         if let Some((d, ctl)) = &mut self.compress {
@@ -554,6 +864,18 @@ impl FeatherApp {
                 None => {}
             }
         }
+    }
+}
+
+/// Python `_dark_dialog(kind="error")` for failed deletions.
+fn error_dialog(head: &str, errors: Vec<String>) -> ConfirmDialog {
+    ConfirmDialog {
+        title: "Some deletions failed".into(),
+        head: head.into(),
+        more: errors.len().saturating_sub(8),
+        details: errors.into_iter().take(8).collect(),
+        error: true,
+        ..Default::default()
     }
 }
 
@@ -581,6 +903,28 @@ impl eframe::App for FeatherApp {
         };
         p.poll();
         self.pb.tick(p);
+        // cloud sync every 5 s, also while the settings page is open
+        self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
+        ctx.request_repaint_after(Duration::from_secs(5));
+
+        if self.settings_open {
+            let star_folder = self.prefs.star_copy_folder.clone();
+            let v = SettingsValues {
+                star_copy: self.prefs.star_copy_enabled,
+                star_folder: &star_folder,
+                loop_clip: self.pb.loop_clip,
+                start_always: self.start_always,
+                trim_gpu: self.trim_gpu,
+                recycle_bin: self.recycle_bin,
+            };
+            let acts = self.settings.show(ctx, &v, &self.cloud, &mut self.phone, &self.lib);
+            for a in acts {
+                self.settings_action(ctx, a);
+            }
+            self.dialogs(ctx);
+            return;
+        }
+        let p = self.player.as_mut().unwrap();
         self.view.input(ctx, p, &mut self.pb);
 
         // right: clip list (declared first so the header only spans the left side)
