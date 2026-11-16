@@ -1,4 +1,4 @@
-//! mpv-backed player: loading files, playback control, state polling, audio tracks, video GL.
+﻿//! mpv-backed player: loading files, playback control, state polling, audio tracks, video GL.
 
 pub mod audio;
 pub mod video_gl;
@@ -6,7 +6,6 @@ pub mod video_gl;
 use crate::mpv;
 use audio::Track;
 use eframe::egui;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,11 +24,15 @@ pub struct Player {
     pub speed: f64,
     /// After a seek, show this position until the deadline so the poll does not snap the thumb back.
     hold: Option<(Instant, f64)>,
+    /// This clip's audio tracks (mpv track-list order).
     pub tracks: Vec<Track>,
-    /// Indexes into `tracks` that are ticked.
-    pub sel: BTreeSet<usize>,
-    pub audio_status: String,
+    /// Set when the tracks of a newly opened clip became known; the app clears it.
+    pub tracks_new: bool,
     lavfi_cur: String,
+    /// `aid` as last set (Python `_aid_cur`).
+    aid_cur: String,
+    /// Pending position check after applying tracks: (when, position, applied at).
+    audio_check: Option<(Instant, f64, Instant)>,
     pub msg: String,
     /// Where to land once the duration of a just-opened clip is known.
     pending_start: Option<(Start, Instant)>,
@@ -77,9 +80,10 @@ impl Player {
             speed: 1.0,
             hold: None,
             tracks: Vec::new(),
-            sel: BTreeSet::new(),
-            audio_status: String::new(),
+            tracks_new: false,
             lavfi_cur: String::new(),
+            aid_cur: "auto".into(),
+            audio_check: None,
             msg: String::new(),
             pending_start: None,
         };
@@ -88,19 +92,24 @@ impl Player {
     }
 
     pub fn open(&mut self, path: &str) {
+        // Python `_mpv_load_now`: no audio graph, and forget a track picked for the last clip
         let _ = self.core.set("lavfi-complex", "");
         self.lavfi_cur.clear();
+        if self.aid_cur != "auto" {
+            let _ = self.core.set("aid", "auto");
+            self.aid_cur = "auto".into();
+        }
+        self.audio_check = None;
         match self.core.cmd(&["loadfile", path]) {
             Ok(()) => {
                 self.path = Some(path.to_owned());
                 self.loaded = false;
                 self.tracks.clear();
-                self.sel.clear();
+                self.tracks_new = false;
                 self.dur = 0.0;
                 self.pos = 0.0;
                 self.eof = false;
                 self.hold = None;
-                self.audio_status.clear();
                 self.msg.clear();
                 self.pending_start = None;
             }
@@ -221,6 +230,7 @@ impl Player {
         }
         if self.loaded {
             self.apply_pending_start();
+            self.audio_check_tick();
             self.dur = self.core.getf("duration").unwrap_or(self.dur);
             if let Some(p) = self.core.getf("time-pos") {
                 self.pos = p;

@@ -16,6 +16,7 @@ use crate::ui::settings::{SettingsAction, SettingsPage, SettingsValues};
 use crate::tray::{Tray, TrayMsg};
 use crate::ui::titlebar::{self, TitleAction, TitleBar};
 use crate::window;
+use crate::tracks::AudioTracks;
 use eframe::{egui, glow};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -41,8 +42,8 @@ pub struct FeatherApp {
     view: PlayerView,
     grid: ClipGrid,
     header: Header,
-    /// Clips with their own audio tracks / volumes (music badge).
-    audio_badges: HashSet<String>,
+    /// Audio tracks editor (Python `_at_*`).
+    tracks: AudioTracks,
     start_always: bool,
     start_zero: HashSet<String>,
     /// Saved playback speed per clip (settings `clip_speeds`), 1x clips are not listed.
@@ -122,8 +123,6 @@ impl FeatherApp {
         let st = prefs::read_settings();
         let step = st.get_i64("see_more_step", 50);
         let step = SEE_MORE_STEPS.iter().copied().find(|s| *s as i64 == step).unwrap_or(50);
-        let keys = |k: &str| st.get(k).and_then(|v| v.as_object()).map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
-        let audio_badges = keys("clip_audio_tracks").into_iter().chain(keys("clip_audio_volumes")).collect();
         let clip_speed = st
             .get("clip_speeds")
             .and_then(|v| v.as_object())
@@ -144,7 +143,7 @@ impl FeatherApp {
             view,
             grid: ClipGrid::default(),
             header: Header::default(),
-            audio_badges,
+            tracks: AudioTracks::load(&st),
             start_always: st.get_bool("always_start_beginning", false),
             start_zero: st.get_str_list("start_from_beginning_clips").into_iter().collect(),
             clip_speed,
@@ -271,6 +270,8 @@ impl FeatherApp {
         }
         self.prefs.save();
         self.lib.current = None;
+        self.tracks.clip_reset(None);
+        self.view.close_audio_menu();
         self.view.now_playing.clear();
         self.view.now_playing_mb.clear();
         self.pb.set_trim_mode(false, None);
@@ -519,24 +520,11 @@ impl FeatherApp {
 
     /// Python `_copy_clip_settings`: a compressed copy keeps the source's tracks, volumes, speed.
     fn copy_clip_settings(&mut self, src: &str, dst: &str) {
-        let mut st = prefs::read_settings();
-        let mut changed = false;
-        for key in ["clip_audio_tracks", "clip_audio_volumes", "clip_speeds"] {
-            if let Some(Value::Object(m)) = st.get_mut(key) {
-                if let Some(v) = m.get(src).cloned() {
-                    m.insert(dst.to_owned(), v);
-                    changed = true;
-                    if key != "clip_speeds" {
-                        self.audio_badges.insert(dst.to_owned());
-                    }
-                }
-            }
-        }
+        self.tracks.copy_clip(src, dst);
         if let Some(s) = self.clip_speed.get(src).copied() {
             self.clip_speed.insert(dst.to_owned(), s);
-        }
-        if changed {
-            prefs::write_settings(&st);
+            let m: serde_json::Map<String, Value> = self.clip_speed.iter().map(|(k, v)| (k.clone(), Value::from(*v))).collect();
+            prefs::save_setting("clip_speeds", Value::Object(m));
         }
     }
 
@@ -564,6 +552,8 @@ impl FeatherApp {
             _ => Start::Middle,
         };
         self.pb.reset_for_clip();
+        self.tracks.clip_reset(Some(&path));
+        self.view.close_audio_menu();
         // speed belongs to the clip: its own saved speed, otherwise 1x
         p.set_speed(self.clip_speed.get(&path).copied().unwrap_or(1.0));
         p.open_clip(&path, start);
@@ -581,6 +571,18 @@ impl FeatherApp {
     }
 
     fn view_action(&mut self, a: ViewAction) {
+        let items = match a {
+            ViewAction::AudioToggle(n) => Some(self.tracks.toggle_track(n)),
+            ViewAction::AudioVol(n, v, fin) => Some(self.tracks.set_vol(n, v, fin)),
+            ViewAction::AudioReset => Some(self.tracks.reset()),
+            _ => None,
+        };
+        if let Some(items) = items {
+            if let (Some(items), Ok(p)) = (items, &mut self.player) {
+                p.apply_tracks(&items);
+            }
+            return;
+        }
         let Some(path) = self.lib.current.clone() else {
             match a {
                 ViewAction::SetSpeed(s) => {
@@ -596,6 +598,7 @@ impl FeatherApp {
             return;
         };
         match a {
+            ViewAction::AudioToggle(_) | ViewAction::AudioVol(..) | ViewAction::AudioReset => {} // handled above
             ViewAction::ToggleStar => {
                 // Python `_toggle_star`: save first, then copy to the starred-clips folder
                 let newly = !self.prefs.starred.remove(&path);
@@ -1005,6 +1008,19 @@ impl FeatherApp {
                 self.win.close_to_tray = on;
                 prefs::save_setting("close_to_tray", Value::Bool(on));
             }
+            SettingsAction::AudioEnabled(on) => {
+                self.tracks.set_enabled(on);
+                if !on {
+                    self.view.close_audio_menu();
+                }
+            }
+            SettingsAction::SteelFirst(on) => self.tracks.set_steel_first(on),
+            SettingsAction::DefaultTrack(n) => self.tracks.default_tick(n),
+            SettingsAction::DefaultVol(n, v, fin) => {
+                if let (Some(items), Ok(p)) = (self.tracks.default_vol(n, v, fin), &mut self.player) {
+                    p.apply_tracks(&items);
+                }
+            }
             SettingsAction::StartWithWindows(on) => {
                 // Python `_on_startup_toggle`: if the registry can't be written the switch
                 // shows the real state again
@@ -1169,6 +1185,14 @@ impl eframe::App for FeatherApp {
             }
         };
         p.poll();
+        if p.tracks_new {
+            // Python _on_track_list_changed: the clip's tracks are known, play the chosen ones
+            p.tracks_new = false;
+            let path = p.path.clone();
+            if let Some(items) = self.tracks.on_tracks(path.as_deref(), &p.tracks) {
+                p.apply_tracks(&items);
+            }
+        }
         self.pb.tick(p);
         // cloud sync every 5 s, also while the settings page is open
         self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
@@ -1186,6 +1210,7 @@ impl eframe::App for FeatherApp {
                 remember_size: self.win.remember_size,
                 close_to_tray: self.win.close_to_tray,
                 start_with_windows: self.win.startup_on,
+                audio: &self.tracks,
             };
             let acts = self.settings.show(ctx, &v, &self.cloud, &mut self.phone, &self.lib);
             for a in acts {
@@ -1198,7 +1223,7 @@ impl eframe::App for FeatherApp {
         self.view.input(ctx, p, &mut self.pb);
 
         // right: clip list (declared first so the header only spans the left side)
-        let badges = Badges { audio: &self.audio_badges };
+        let badges = Badges { audio: &self.tracks.badges };
         let mut grid_acts = Vec::new();
         egui::SidePanel::right("clips")
             .resizable(true)
@@ -1225,9 +1250,8 @@ impl eframe::App for FeatherApp {
             None => ClipState::default(),
         };
         let p = self.player.as_mut().unwrap();
-        let view_acts = self.view.controls(ctx, p, &mut self.pb, &clip);
-        let video = self.view.video(ctx, p, &mut self.pb);
-        self.view.audio_overlay(ctx, p, video);
+        let view_acts = self.view.controls(ctx, p, &mut self.pb, &clip, &self.tracks);
+        self.view.video(ctx, p, &mut self.pb);
 
         for a in view_acts {
             self.view_action(a);

@@ -1,12 +1,13 @@
 ﻿//! Settings page (Python `_build_settings_page`): replaces the main window while open.
 //! Ported so far: Starred clips, Cloud sync, Phone sync, Playback, Trimming, Clips (Recycle
-//! Bin), Window. Appearance, Audio, auto-refresh, Load more, thumbnail cache and the shortcut
+//! Bin), Audio, Window. Appearance, auto-refresh, Load more, thumbnail cache and the shortcut
 //! cards come with their features.
 
 use super::widgets::{self, ellipsize, Ghost, Row};
 use crate::library::{Library, NONE_KEY};
 use crate::sync::{cloud_kind, phone_kind, Cloud, DotKind, Phone};
 use crate::theme::{self, c};
+use crate::tracks::AudioTracks;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 
 pub enum SettingsAction {
@@ -29,6 +30,11 @@ pub enum SettingsAction {
     RememberSize(bool),
     CloseToTray(bool),
     StartWithWindows(bool),
+    AudioEnabled(bool),
+    SteelFirst(bool),
+    DefaultTrack(usize),
+    /// Default volume of track n: (value, slider released).
+    DefaultVol(usize, f64, bool),
 }
 
 /// Values the page shows (the rest is read from `Cloud` / `Phone`).
@@ -42,6 +48,7 @@ pub struct SettingsValues<'a> {
     pub remember_size: bool,
     pub close_to_tray: bool,
     pub start_with_windows: bool,
+    pub audio: &'a AudioTracks,
 }
 
 #[derive(Default)]
@@ -304,11 +311,49 @@ impl SettingsPage {
                                 }
                             });
                             divider(ui);
-                            row(ui, "Always start clips from the beginning", "Long clips normally open in the middle; this makes every clip start at 0:00", |ui| {
+                            row(ui, "Always start clips from the beginning", "Long clips normally open in the middle; this makes every clip start at 0:00 (trimmed clips still start at their trim)", |ui| {
                                 if toggle(ui, v.start_always) {
                                     acts.push(SettingsAction::StartAlways(!v.start_always));
                                 }
                             });
+                        });
+
+                        section(ui, "AUDIO", |ui| {
+                            row(ui, "Audio track controls", "Show the audio tracks button under the player and the default audio track settings below. Turn off to hide both; every clip then plays with the default audio tracks", |ui| {
+                                if toggle(ui, v.audio.enabled) {
+                                    acts.push(SettingsAction::AudioEnabled(!v.audio.enabled));
+                                }
+                            });
+                            divider(ui);
+                            row(ui, "SteelSeries GG Moments: first track only", "SteelSeries clips start with only the first audio track (no Game + Mic mix), which avoids the black screen. Turn the Mic on for a single clip with the audio tracks button under the player", |ui| {
+                                if toggle(ui, v.audio.steel_first_only) {
+                                    acts.push(SettingsAction::SteelFirst(!v.audio.steel_first_only));
+                                }
+                            });
+                            // everything below is hidden together with the audio tracks button
+                            if v.audio.enabled {
+                                divider(ui);
+                                row(ui, "Default audio tracks", "Tracks played and the volume of each, by default, when a clip has several tracks", |_| {});
+                                ui.horizontal(|ui| {
+                                    ui.add_space(10.0);
+                                    ui.vertical(|ui| {
+                                        ui.set_width(340.0);
+                                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
+                                        for n in 1..=6 {
+                                            let on = v.audio.defaults.contains(&n);
+                                            let vol = v.audio.def_vol.get(&n).copied().unwrap_or(1.0);
+                                            let r = widgets::track_row(ui, &format!("Track {n}"), on, vol, 30.0);
+                                            if r.toggled {
+                                                acts.push(SettingsAction::DefaultTrack(n));
+                                            }
+                                            if let Some((x, fin)) = r.volume {
+                                                acts.push(SettingsAction::DefaultVol(n, x, fin));
+                                            }
+                                        }
+                                        ui.add_space(12.0);
+                                    });
+                                });
+                            }
                         });
 
                         section(ui, "TRIMMING", |ui| {

@@ -1,4 +1,4 @@
-//! Left side: video area, now-playing row and the player controls (Python `_build_ui`
+﻿//! Left side: video area, now-playing row and the player controls (Python `_build_ui`
 //! controls): playback bar with trim handles, speed menu, trim and fullscreen buttons,
 //! star/heart, frame step + play/pause, volume. Plus keyboard, drag&drop and the audio-track
 //! overlay (from the proof of concept; Python's audio menu is ported later).
@@ -9,6 +9,7 @@ use super::trim_slider::slim_slider;
 use super::widgets::{self, play_button};
 use crate::playback::Playback;
 use crate::player::Player;
+use crate::tracks::AudioTracks;
 use crate::theme::{self, c};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Vec2};
 use std::time::{Duration, Instant};
@@ -27,6 +28,12 @@ pub enum ViewAction {
     SetSpeed(f64),
     /// A trim handle was let go: save [start, end] (0..10000).
     TrimSaved(f64, f64),
+    /// Audio tracks popup: tick / untick track n (1-based).
+    AudioToggle(usize),
+    /// Audio tracks popup: track n volume (value, slider released).
+    AudioVol(usize, f64, bool),
+    /// "Use defaults" / right click on the audio button.
+    AudioReset,
 }
 
 /// What the controls need to know about the open clip.
@@ -151,8 +158,17 @@ impl PlayerView {
         }
     }
 
-    pub fn controls(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback, clip: &ClipState) -> Vec<ViewAction> {
+    /// Close the audio tracks popup (Python _close_audio_menu, also on a new clip).
+    pub fn close_audio_menu(&mut self) {
+        self.audio_menu = false;
+    }
+
+    pub fn controls(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback, clip: &ClipState, at: &AudioTracks) -> Vec<ViewAction> {
         let mut acts = Vec::new();
+        if !at.enabled {
+            self.audio_menu = false;
+        }
+        let mut audio_btn = Rect::NOTHING;
         if p.volume == 0.0 {
             self.muted = true;
         }
@@ -185,7 +201,8 @@ impl PlayerView {
                 ui.add_space(10.0 + 8.0);
                 let tl = ui.allocate_exact_size(Vec2::new(30.0, 34.0), Sense::hover()).0;
                 ui.painter().text(Pos2::new(tl.left(), tl.center().y), Align2::LEFT_CENTER, fmt(pb.shown_pos), theme::font_tiny(), theme::text_muted());
-                let right_w = 30.0 + (4.0 + 42.0) + (4.0 + 34.0) + (4.0 + 34.0) + 10.0;
+                let audio_w = if at.enabled { 4.0 + 34.0 } else { 0.0 };
+                let right_w = 30.0 + audio_w + (4.0 + 42.0) + (4.0 + 34.0) + (4.0 + 34.0) + 10.0;
                 let bar_w = (ui.available_width() - right_w - 16.0).max(60.0);
                 ui.add_space(8.0);
                 let evs = pb.bar.show(ui, bar_w, p.dur);
@@ -195,6 +212,37 @@ impl PlayerView {
                 ui.add_space(8.0);
                 let dl = ui.allocate_exact_size(Vec2::new(30.0, 34.0), Sense::hover()).0;
                 ui.painter().text(Pos2::new(dl.right(), dl.center().y), Align2::RIGHT_CENTER, fmt(p.dur), theme::font_tiny(), theme::text_muted());
+
+                // audio tracks (Python udio_btn): click = this clip's tracks, right click =
+                // back to the default tracks; hidden when turned off in settings
+                if at.enabled {
+                    ui.add_space(4.0);
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                    let hov = resp.hovered();
+                    if hov && at.ctl {
+                        ui.painter().circle_filled(r.center(), 16.0, c("#242444"));
+                    }
+                    if hov {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let col = if !at.ctl {
+                        theme::text_dim()
+                    } else if at.changed() {
+                        theme::accent()
+                    } else if hov {
+                        theme::text_primary()
+                    } else {
+                        theme::text_muted()
+                    };
+                    ui.painter().text(r.center() - Vec2::new(0.0, 1.0), Align2::CENTER_CENTER, "\u{266b}", theme::font_pt(12.0), col);
+                    audio_btn = r;
+                    if resp.clicked() {
+                        self.audio_menu = !self.audio_menu;
+                    }
+                    if resp.secondary_clicked() {
+                        acts.push(ViewAction::AudioReset);
+                    }
+                }
 
                 // speed: click = menu of speeds, right click = back to 1x
                 ui.add_space(4.0);
@@ -347,6 +395,55 @@ impl PlayerView {
                 }
             }
         }
+
+        // audio tracks menu, centred above the button; stays open while ticking
+        if self.audio_menu && audio_btn.is_positive() {
+            let pw = if at.ctl { 340.0 } else { 240.0 };
+            let area = egui::Area::new(egui::Id::new("audio_menu"))
+                .fixed_pos(Pos2::new(audio_btn.center().x, audio_btn.top() - 4.0))
+                .pivot(Align2::CENTER_BOTTOM)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, c("#52527e"))).corner_radius(10).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                        ui.set_width(pw - 12.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
+                        if !at.ctl {
+                            // nothing to pick: say why and list what was found
+                            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                                ui.set_max_width(210.0);
+                                ui.add(egui::Label::new(egui::RichText::new(at.status_text()).font(theme::font_tiny()).color(theme::text_muted())).wrap());
+                            });
+                            for n in 1..=at.tracks.len() {
+                                let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+                                ui.painter().text(Pos2::new(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, at.label(n), theme::font_ui(), theme::text_muted());
+                            }
+                        } else {
+                            for n in 1..=at.tracks.len() {
+                                let sel = at.sel.as_ref().is_some_and(|s| s.contains(&n));
+                                let r = widgets::track_row(ui, &at.label(n), sel, at.eff_vol(n), 30.0);
+                                if r.toggled {
+                                    acts.push(ViewAction::AudioToggle(n));
+                                }
+                                if let Some((v, fin)) = r.volume {
+                                    acts.push(ViewAction::AudioVol(n, v, fin));
+                                }
+                            }
+                            ui.add_space(3.0);
+                            if widgets::Row::new("Use defaults").height(30.0).show(ui).clicked() {
+                                acts.push(ViewAction::AudioReset);
+                            }
+                        }
+                    });
+                });
+            if ctx.input(|i| i.pointer.any_pressed()) {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    if !area.response.rect.contains(pos) && !audio_btn.contains(pos) {
+                        self.audio_menu = false;
+                    }
+                }
+            }
+        }
         acts
     }
 
@@ -373,61 +470,6 @@ impl PlayerView {
             ctx.request_repaint_after(Duration::from_millis(15));
         }
         video_rect
-    }
-
-    /// Audio track picker drawn ON TOP of the video.
-    pub fn audio_overlay(&mut self, ctx: &egui::Context, p: &mut Player, video_rect: Rect) {
-        if !(p.loaded && !p.tracks.is_empty() && video_rect.is_positive()) {
-            return;
-        }
-        let anchor = Pos2::new(video_rect.right() - 14.0, video_rect.top() + 14.0);
-        let btn = egui::Area::new(egui::Id::new("audio_btn"))
-            .fixed_pos(anchor)
-            .pivot(Align2::RIGHT_TOP)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let label = if p.sel.len() > 1 { format!("\u{266b}  mixing {}", p.sel.len()) } else { "\u{266b}  Audio tracks".to_string() };
-                ui.add(egui::Button::new(egui::RichText::new(label).font(theme::font_ui()).color(Color32::WHITE)).fill(Color32::from_black_alpha(170)))
-            });
-        if btn.inner.clicked() {
-            self.audio_menu = !self.audio_menu;
-        }
-        if !self.audio_menu {
-            return;
-        }
-        let mut changed = false;
-        let menu = egui::Area::new(egui::Id::new("audio_menu"))
-            .fixed_pos(anchor + egui::vec2(0.0, 34.0))
-            .pivot(Align2::RIGHT_TOP)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                widgets::popup_frame().show(ui, |ui| {
-                    ui.set_width(300.0);
-                    ui.label(egui::RichText::new("Tick several tracks to mix them").font(theme::font_tiny()).color(theme::text_dim()));
-                    ui.add_space(4.0);
-                    for i in 0..p.tracks.len() {
-                        let on = p.sel.contains(&i);
-                        if widgets::Row::new(&p.tracks[i].label).check(on).show(ui).clicked() {
-                            if !on {
-                                p.sel.insert(i);
-                            } else if p.sel.len() > 1 {
-                                p.sel.remove(&i);
-                            }
-                            changed = true;
-                        }
-                    }
-                });
-            });
-        if changed {
-            p.apply_audio();
-        }
-        if ctx.input(|i| i.pointer.any_pressed()) {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                if !menu.response.rect.contains(pos) && !btn.response.rect.contains(pos) {
-                    self.audio_menu = false;
-                }
-            }
-        }
     }
 }
 

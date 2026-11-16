@@ -1,11 +1,16 @@
-//! Audio track listing, picking and mixing (FeatherPlayer `_at_build_graph` rules).
+//! Audio tracks on the mpv side: reading the track list and playing a chosen set of tracks at
+//! chosen volumes (FeatherPlayer `_at_build_graph` / `_at_apply` / `_at_apply_keep_pos`).
+//! Which tracks to play is decided in `crate::tracks`.
 
 use super::Player;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Debug)]
 pub struct Track {
     pub id: i64,
-    pub label: String,
+    pub title: String,
+    /// Stream `handler_name` metadata ("Game" / "Mic" in SteelSeries clips).
+    pub handler: String,
 }
 
 /// Same rules as FeatherPlayer._at_build_graph: one untouched track is picked directly (aid),
@@ -33,52 +38,72 @@ pub fn build_graph(items: &[(i64, f64)]) -> (Option<i64>, String) {
 }
 
 impl Player {
+    /// Python `_read_track_list`: track-list as JSON text, audio entries only.
     pub(super) fn read_tracks(&mut self) {
         self.tracks.clear();
-        let count: usize = self.core.get("track-list/count").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let mut n = 0;
-        for i in 0..count {
-            if self.core.get(&format!("track-list/{i}/type")).as_deref() != Some("audio") {
+        let raw = self.core.get("track-list").unwrap_or_default();
+        let list: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        for t in list.as_array().into_iter().flatten() {
+            if t.get("type").and_then(|v| v.as_str()) != Some("audio") {
                 continue;
             }
-            let id: i64 = self.core.get(&format!("track-list/{i}/id")).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let title = self.core.get(&format!("track-list/{i}/title")).unwrap_or_default();
-            let lang = self.core.get(&format!("track-list/{i}/lang")).unwrap_or_default();
-            let codec = self.core.get(&format!("track-list/{i}/codec")).unwrap_or_default();
-            n += 1;
-            let detail = [title, lang, codec].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" \u{b7} ");
-            self.tracks.push(Track { id, label: format!("Track {n}  {detail}") });
+            let s = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            self.tracks.push(Track {
+                id: t.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                title: s(t.get("title")),
+                handler: s(t.get("metadata").and_then(|m| m.get("handler_name"))),
+            });
         }
-        self.sel.clear();
-        if !self.tracks.is_empty() {
-            self.sel.insert(0);
-            self.audio_status = format!("aid {} (mpv default)", self.tracks[0].id);
+        self.tracks_new = true;
+    }
+
+    /// Python `_mpv_set_lavfi`: only set lavfi-complex when it changes (each set rebuilds
+    /// mpv's filter graph).
+    pub(super) fn set_lavfi(&mut self, graph: &str) {
+        if graph != self.lavfi_cur {
+            if let Err(e) = self.core.set("lavfi-complex", graph) {
+                self.msg = e;
+            }
+            self.lavfi_cur = graph.to_owned();
         }
     }
 
-    /// Make mpv play exactly the ticked tracks (keeps the playback position, like _at_apply_keep_pos).
-    pub fn apply_audio(&mut self) {
-        let items: Vec<(i64, f64)> = self.sel.iter().filter_map(|&n| self.tracks.get(n)).map(|t| (t.id, 1.0)).collect();
-        if items.is_empty() {
+    /// Python `_at_apply_keep_pos`: play exactly these (track id, volume) items without losing
+    /// the place (adding a track makes mpv jump ahead): remember the position, apply, seek
+    /// back, and check again after 350 ms.
+    pub fn apply_tracks(&mut self, items: &[(i64, f64)]) {
+        if items.is_empty() || !self.loaded {
             return;
         }
-        let pos = self.core.getf("time-pos");
-        let (aid, graph) = build_graph(&items);
-        if graph != self.lavfi_cur {
-            if let Err(e) = self.core.set("lavfi-complex", &graph) {
-                self.msg = e;
-            }
-            self.lavfi_cur = graph.clone();
-        }
+        // a clip that was just told where to start: that spot, not mpv's position yet
+        let held = self.hold.filter(|(until, _)| Instant::now() < *until).map(|(_, t)| t);
+        let pos = held.or_else(|| self.core.getf("time-pos"));
+        let (aid, graph) = build_graph(items);
+        self.set_lavfi(&graph);
         if let Some(a) = aid {
             let _ = self.core.set("aid", &a.to_string());
-            self.audio_status = format!("aid {a}");
-        } else {
-            self.audio_status = graph;
+            self.aid_cur = a.to_string();
         }
         if let Some(p) = pos {
             let _ = self.core.cmd(&["seek", &format!("{p}"), "absolute+exact"]);
-            self.hold = Some((Instant::now() + Duration::from_millis(400), p));
+            let now = Instant::now();
+            self.hold = Some((now + Duration::from_millis(400), p));
+            self.audio_check = Some((now + Duration::from_millis(350), p, now));
+        }
+    }
+
+    /// The 350 ms check of `_at_apply_keep_pos`: if mpv still ended up away from where it
+    /// should be, put it back.
+    pub(super) fn audio_check_tick(&mut self) {
+        let Some((due, pos, t0)) = self.audio_check else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.audio_check = None;
+        let Some(now) = self.core.getf("time-pos") else { return };
+        let expect = if self.core.flag("pause") { pos } else { pos + t0.elapsed().as_secs_f64() };
+        if (now - expect).abs() > 0.5 {
+            let _ = self.core.cmd(&["seek", &format!("{expect}"), "absolute+exact"]);
         }
     }
 }

@@ -1,4 +1,4 @@
-//! FeatherPlayer-rs: Rust port of FeatherPlayer (see CLAUDE.md).
+﻿//! FeatherPlayer-rs: Rust port of FeatherPlayer (see CLAUDE.md).
 //!
 //! Modules:
 //!   app     - eframe app shell
@@ -14,6 +14,7 @@
 //!   sync    - cloud folder sync, phone (ClipSync) sync, starred copy, Recycle Bin
 //!   window  - Win32: DWM frame, window rect, single instance, Start with Windows
 //!   tray    - tray icon while the window is hidden
+//!   tracks  - audio tracks editor: defaults, per-clip tracks/volumes, SteelSeries
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -28,6 +29,7 @@ mod prefs;
 mod scanner;
 mod sync;
 mod theme;
+mod tracks;
 mod tray;
 mod ui;
 mod window;

@@ -341,3 +341,91 @@ pub fn top_rounded(r: f32) -> CornerRadius {
     let r = r as u8;
     CornerRadius { nw: r, ne: r, sw: 0, se: 0 }
 }
+
+// ---------------------------------------------------------------------------------------------
+// TrackRow
+// ---------------------------------------------------------------------------------------------
+
+/// What a `track_row` did this frame.
+#[derive(Default)]
+pub struct TrackRowResp {
+    /// Name clicked: tick / untick the track.
+    pub toggled: bool,
+    /// Volume changed: (value, final). Final on release, or right click = 100 %.
+    pub volume: Option<(f64, bool)>,
+}
+
+/// Python `TrackRow`: tick box, name and a small volume slider (0-200 %, steps of 10 %).
+/// Click the name = tick, drag the slider = volume (applied on release), right click the
+/// slider = back to 100 %.
+pub fn track_row(ui: &mut egui::Ui, text: &str, checked: bool, vol: f64, height: f32) -> TrackRowResp {
+    const SL_W: f32 = 80.0;
+    const PCT_W: f32 = 38.0;
+    const MAXV: f64 = 2.0;
+    let mut out = TrackRowResp::default();
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, height), Sense::click_and_drag());
+    let sl0 = rect.right() - 12.0 - PCT_W - SL_W;
+    let in_slider = |x: f32| x >= sl0 - 8.0;
+    let val_at = |x: f32| {
+        let v = (((x - sl0) / SL_W) as f64 * MAXV).clamp(0.0, MAXV);
+        (v * 10.0).round() / 10.0
+    };
+    let origin_in_slider = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| in_slider(p.x));
+    let pointer_x = ui.input(|i| i.pointer.interact_pos()).map(|p| p.x);
+    let mut vol = vol;
+    if let Some(x) = pointer_x {
+        if (resp.clicked() || resp.drag_stopped()) && origin_in_slider {
+            vol = val_at(x);
+            out.volume = Some((vol, true));
+        } else if resp.is_pointer_button_down_on() && origin_in_slider {
+            let v = val_at(x);
+            if (v - vol).abs() > 1e-9 {
+                vol = v;
+                out.volume = Some((v, false));
+            }
+        } else if resp.clicked() {
+            out.toggled = true;
+        }
+        if resp.secondary_clicked() && in_slider(x) {
+            vol = 1.0;
+            out.volume = Some((1.0, true));
+        }
+    }
+    let checked = checked ^ out.toggled;
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let cy = rect.center().y;
+    if hover {
+        p.rect_filled(rect.shrink(1.0), 7.0, c("#2c2c50"));
+    }
+    let fg = if hover || checked { Color32::WHITE } else { theme::text_muted() };
+    let x = rect.left() + 12.0;
+    let b = Rect::from_min_max(Pos2::new(x, cy - 8.0), Pos2::new(x + 16.0, cy + 8.0));
+    if checked {
+        p.rect_filled(b, 5.0, theme::accent());
+        icons::paint(ui, b.center(), "check", 12.0, theme::accent_fg(), false, 2.6);
+    } else {
+        p.rect(b, 5.0, c("#242444"), Stroke::new(1.0_f32, c("#52527e")), egui::StrokeKind::Inside);
+    }
+    let x = x + 26.0;
+    let room = (sl0 - 14.0 - x).max(20.0);
+    let font = theme::font_ui();
+    let p = ui.painter();
+    p.text(Pos2::new(x, cy), egui::Align2::LEFT_CENTER, ellipsize(ui, text, &font, room, true), font, fg);
+    // volume slider
+    let hx = sl0 + (vol / MAXV) as f32 * SL_W;
+    p.rect_filled(Rect::from_min_max(Pos2::new(sl0, cy - 2.0), Pos2::new(sl0 + SL_W, cy + 2.0)), 0.0, c("#52527e"));
+    if hx > sl0 + 1.0 {
+        p.rect_filled(Rect::from_min_max(Pos2::new(sl0, cy - 2.0), Pos2::new(hx, cy + 2.0)), 0.0, if checked { theme::accent() } else { theme::text_dim() });
+    }
+    let mx = sl0 + SL_W / 2.0; // 100 % notch
+    p.line_segment([Pos2::new(mx, cy - 9.0), Pos2::new(mx, cy - 6.0)], Stroke::new(1.0_f32, theme::text_dim()));
+    p.rect_filled(Rect::from_min_max(Pos2::new(hx - 3.0, cy - 6.0), Pos2::new(hx + 3.0, cy + 6.0)), 0.0, if checked { Color32::WHITE } else { theme::text_muted() });
+    let off = (vol - 1.0).abs() > 0.004;
+    p.text(Pos2::new(rect.right() - 12.0, cy), egui::Align2::RIGHT_CENTER, format!("{}%", (vol * 100.0).round() as i64), theme::font_tiny(), if off && checked { theme::accent() } else { theme::text_dim() });
+    if hover {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    out
+}
