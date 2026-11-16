@@ -152,6 +152,8 @@ impl AccentDialog {
         let hue = self.hue_texture(ctx);
         let frame = egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, c("#33335a"))).corner_radius(10).inner_margin(egui::Margin::ZERO);
         let resp = egui::Modal::new(egui::Id::new("accent_dialog")).frame(frame).show(ctx, |ui| {
+            // right-to-left rows would otherwise stretch the modal to egui's default area width
+            ui.set_max_width(SVW as f32 + 48.0);
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
                 ui.label(egui::RichText::new(format!("Accent color for {}", self.theme)).font(theme::font_ui()).color(theme::text_primary()));

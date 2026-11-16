@@ -120,7 +120,11 @@ impl Playback {
                         let t_end = self.bar.trim_end / 10000.0 * p.dur;
                         self.trim_past_ok = self.trim_mode && secs >= t_end - 0.05;
                         self.trim_seek_t = Instant::now();
-                        p.seek(secs);
+                        // the press/drag already seeked here: a second exact seek to the same
+                        // spot only made mpv decode again (felt like lag while paused)
+                        if v as i64 != self.seek_last_val {
+                            p.seek(secs);
+                        }
                         self.shown_pos = secs;
                         // dropped exactly on a trim line: stay paused there
                         if self.trim_mode && ((v - self.bar.trim_start).abs() < 0.5 || (v - self.bar.trim_end).abs() < 0.5) {
@@ -189,10 +193,12 @@ impl Playback {
                     p.seek(t_start);
                     pos = t_start;
                 } else {
+                    // just stop on the frame that is showing: a seek to t_end here was a
+                    // keyframe seek and made the picture snap back. The bar is drawn on the
+                    // trim line anyway (pos is clamped above).
                     self.at_trim_end = true;
-                    p.seek(t_end);
-                    pos = t_end;
                     p.pause();
+                    pos = pos.min(t_end);
                 }
             }
             // loop an untrimmed clip at its end

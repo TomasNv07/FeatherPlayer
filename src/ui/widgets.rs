@@ -371,7 +371,18 @@ pub fn track_row(ui: &mut egui::Ui, text: &str, checked: bool, vol: f64, height:
         let v = (((x - sl0) / SL_W) as f64 * MAXV).clamp(0.0, MAXV);
         (v * 10.0).round() / 10.0
     };
-    let origin_in_slider = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| in_slider(p.x));
+    // egui clears press_origin on the release frame, so remember where this press started;
+    // otherwise the final (apply) value of a drag was never sent
+    let origin_id = resp.id.with("press_in_slider");
+    if resp.is_pointer_button_down_on() {
+        if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+            ui.data_mut(|d| d.insert_temp(origin_id, in_slider(o.x)));
+        }
+    }
+    let origin_in_slider = ui.data(|d| d.get_temp::<bool>(origin_id)).unwrap_or(false);
+    if resp.clicked() || resp.drag_stopped() || !resp.is_pointer_button_down_on() {
+        ui.data_mut(|d| d.remove::<bool>(origin_id));
+    }
     let pointer_x = ui.input(|i| i.pointer.interact_pos()).map(|p| p.x);
     let mut vol = vol;
     if let Some(x) = pointer_x {

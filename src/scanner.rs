@@ -314,10 +314,43 @@ pub fn video_duration(path: &str, ffmpeg: &Path) -> f64 {
     out.and_then(|o| String::from_utf8_lossy(&o).trim().parse().ok()).unwrap_or(0.0)
 }
 
+/// The clip's audio tracks as mpv will number them (1.. in stream order), with the stream
+/// title and `handler_name` tag. Lets the app set up a clip's audio mix before mpv opens it.
+pub fn audio_tracks(path: &str, ffmpeg: &Path) -> Option<Vec<crate::player::audio::Track>> {
+    let out = run_timeout(
+        Command::new(ffprobe_for(ffmpeg)).args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags", "-of", "json", path]),
+        Duration::from_secs(8),
+    )?;
+    let v: serde_json::Value = serde_json::from_slice(&out).ok()?;
+    let streams = v.get("streams")?.as_array()?;
+    let tag = |s: &serde_json::Value, key: &str| -> String {
+        s.get("tags").and_then(|t| t.as_object()).and_then(|t| t.iter().find(|(k, _)| k.eq_ignore_ascii_case(key))).and_then(|(_, v)| v.as_str()).unwrap_or("").to_owned()
+    };
+    Some(streams.iter().enumerate().map(|(i, s)| crate::player::audio::Track { id: i as i64 + 1, title: tag(s, "title"), handler: tag(s, "handler_name") }).collect())
+}
+
 /// `m:ss` or `h:mm:ss` from whole seconds, as stored in prefs `durations`.
 pub fn fmt_dur(secs: f64) -> String {
     let s = secs as i64;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+#[cfg(test)]
+#[test]
+fn parse_dur_formats() {
+    assert_eq!(parse_dur("1:05"), Some(65.0));
+    assert_eq!(parse_dur("1:02:03"), Some(3723.0));
+    assert_eq!(parse_dur(&fmt_dur(754.0)), Some(754.0));
+    assert_eq!(parse_dur("x"), None);
+}
+
+/// Seconds from a prefs `durations` string (`m:ss` / `h:mm:ss`).
+pub fn parse_dur(s: &str) -> Option<f64> {
+    let mut secs = 0.0;
+    for part in s.trim().split(':') {
+        secs = secs * 60.0 + part.trim().parse::<f64>().ok()?;
+    }
+    Some(secs)
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -362,12 +395,15 @@ pub struct ThumbResult {
     /// New duration string for prefs `durations` (only when it was asked for).
     pub dur: Option<String>,
     pub image: Option<ColorImage>,
+    /// Audio track layout (only when it was asked for).
+    pub tracks: Option<Vec<crate::player::audio::Track>>,
 }
 
 struct Job {
     gen: u64,
     path: String,
     need_dur: bool,
+    need_tracks: bool,
     /// Phase 2 of a refresh (already-known clips): throttled so new clips win.
     slow: bool,
 }
@@ -431,17 +467,18 @@ impl Scanner {
 
     /// Replace the thumbnail queue. `priority` (clips new since the last scan) go first; when
     /// there are any, the rest is throttled (Python `_load_thumbnails` two phases).
-    /// `need_dur(path)` says whether the duration is still unknown.
-    pub fn load_thumbs(&self, priority: Vec<String>, rest: Vec<String>, need_dur: impl Fn(&str) -> bool) {
+    /// `need_dur(path)` says whether the duration is still unknown, `need_tracks(path)` the
+    /// audio track layout.
+    pub fn load_thumbs(&self, priority: Vec<String>, rest: Vec<String>, need_dur: impl Fn(&str) -> bool, need_tracks: impl Fn(&str) -> bool) {
         let gen = self.q.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let slow_rest = !priority.is_empty();
         let mut jobs = self.q.jobs.lock().unwrap();
         jobs.clear();
         for p in priority {
-            jobs.push_back(Job { gen, need_dur: need_dur(&p), path: p, slow: false });
+            jobs.push_back(Job { gen, need_dur: need_dur(&p), need_tracks: need_tracks(&p), path: p, slow: false });
         }
         for p in rest {
-            jobs.push_back(Job { gen, need_dur: need_dur(&p), path: p, slow: slow_rest });
+            jobs.push_back(Job { gen, need_dur: need_dur(&p), need_tracks: need_tracks(&p), path: p, slow: slow_rest });
         }
         self.q.cv.notify_all();
     }
@@ -470,9 +507,10 @@ fn worker(q: Arc<Queue>, tx: Sender<Msg>, ffmpeg: Option<PathBuf>, ctx: eframe::
                 }
             }
         }
+        let tracks = if job.need_tracks { ffmpeg.as_deref().and_then(|ff| audio_tracks(&job.path, ff)) } else { None };
         let image = get_thumb(&job.path, ffmpeg.as_deref()).and_then(|p| decode(&p));
-        if dur.is_some() || image.is_some() {
-            let _ = tx.send(Msg::Thumb(ThumbResult { path: job.path, dur, image }));
+        if dur.is_some() || image.is_some() || tracks.is_some() {
+            let _ = tx.send(Msg::Thumb(ThumbResult { path: job.path, dur, image, tracks }));
             ctx.request_repaint();
         }
         if job.slow {

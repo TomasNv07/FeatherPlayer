@@ -75,6 +75,8 @@ pub struct ClipGrid {
     /// Month shown in the calendar, and whether its year list is open.
     cal_ym: (i32, u32),
     cal_year_open: bool,
+    /// Clip card under the mouse this frame (preloaded by the app).
+    pub hovered: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +94,7 @@ pub struct Badges<'a> {
 impl ClipGrid {
     pub fn show(&mut self, ui: &mut egui::Ui, lib: &mut Library, prefs: &Prefs, badges: &Badges) -> Vec<GridAction> {
         let mut acts = Vec::new();
+        self.hovered = None;
         self.header(ui, lib, prefs, &mut acts);
         self.grid(ui, lib, prefs, badges, &mut acts);
         acts
@@ -485,6 +488,7 @@ impl ClipGrid {
                 let heart = self.draw_card(ui, card, ch, path, hovered, lib, prefs, badges);
                 if hovered {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    self.hovered = Some(path.clone());
                     if pressed1 {
                         if ptr.is_some_and(|p| heart.contains(p)) {
                             acts.push(GridAction::ToggleLike(path.clone()));

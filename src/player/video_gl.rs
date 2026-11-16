@@ -7,6 +7,13 @@ use eframe::egui::{self, Rect};
 use eframe::{egui_glow, glow};
 use glow::HasContext;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// While the video rectangle keeps changing size (window resize), mpv keeps rendering at the
+/// old size and that picture is scaled into the new rectangle. Re-allocating the texture and
+/// making mpv rebuild its scaler buffers for every new size is what made resizing lag.
+/// Once the size has been stable this long, it renders at the real size again.
+pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 pub struct VideoGl {
@@ -14,6 +21,9 @@ pub struct VideoGl {
     tex: Option<glow::Texture>,
     w: i32,
     h: i32,
+    /// Latest requested size and since when (resize debounce).
+    want: (i32, i32),
+    want_since: Option<Instant>,
 }
 
 impl VideoGl {
@@ -62,6 +72,21 @@ impl VideoGl {
     }
 }
 
+/// Render a waiting mpv frame into the player's own texture without showing it (a player
+/// that is loading or preloading off screen; see `Core::render_if_wanted`). Keeps the
+/// texture's size, so a swapped-in preload doesn't have to re-allocate. GL thread.
+pub fn render_offscreen(core: &mpv::Core, vgl: &Mutex<VideoGl>, gl: &glow::Context, w: i32, h: i32) {
+    let mut st = vgl.lock().unwrap();
+    if st.w <= 0 || st.h <= 0 {
+        st.ensure(gl, w.max(16), h.max(16));
+    }
+    let (rw, rh) = (st.w, st.h);
+    if let Some(fbo) = st.fbo {
+        core.render_if_wanted(fbo.0.get() as i32, rw, rh);
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+    }
+}
+
 /// Paint callback that renders the current mpv frame into `rect`.
 pub fn video_callback(core: Arc<mpv::Core>, vgl: Arc<Mutex<VideoGl>>, rect: Rect) -> egui::PaintCallback {
     egui::PaintCallback {
@@ -74,23 +99,41 @@ pub fn video_callback(core: Arc<mpv::Core>, vgl: Arc<Mutex<VideoGl>>, rect: Rect
             }
             let gl: &glow::Context = painter.gl().as_ref();
             let mut st = vgl.lock().unwrap();
-            st.ensure(gl, w, h);
+            if st.want != (w, h) {
+                st.want = (w, h);
+                st.want_since = Some(Instant::now());
+            }
+            let settled = st.want_since.is_none_or(|t| t.elapsed() >= RESIZE_SETTLE);
+            // keep the current texture while resizing (none yet: allocate right away)
+            if settled || st.w <= 0 || st.h <= 0 {
+                st.ensure(gl, w, h);
+            }
+            let (rw, rh) = (st.w, st.h);
             let Some(fbo) = st.fbo else { return };
-            if core.render(fbo.0.get() as i32, w, h) {
+            if core.render(fbo.0.get() as i32, rw, rh) {
+                // same size: 1:1. While resizing: scale the old picture evenly and centre it
+                // (stretching it to the new rect distorted the video's aspect ratio)
+                let (dx, dy, dw, dh, filter) = if (rw, rh) == (w, h) {
+                    (0, 0, w, h, glow::NEAREST)
+                } else {
+                    let s = (w as f32 / rw as f32).min(h as f32 / rh as f32);
+                    let (dw, dh) = ((rw as f32 * s).round() as i32, (rh as f32 * s).round() as i32);
+                    ((w - dw) / 2, (h - dh) / 2, dw, dh, glow::LINEAR)
+                };
                 unsafe {
                     gl.bind_framebuffer(glow::READ_FRAMEBUFFER, st.fbo);
                     gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
                     gl.blit_framebuffer(
                         0,
                         0,
-                        w,
-                        h,
-                        vp.left_px,
-                        vp.from_bottom_px,
-                        vp.left_px + w,
-                        vp.from_bottom_px + h,
+                        rw,
+                        rh,
+                        vp.left_px + dx,
+                        vp.from_bottom_px + dy,
+                        vp.left_px + dx + dw,
+                        vp.from_bottom_px + dy + dh,
                         glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
+                        filter,
                     );
                     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }

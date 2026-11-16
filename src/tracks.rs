@@ -24,6 +24,7 @@ pub struct AudioSnap {
     pub defaults: Vec<usize>,
 }
 
+#[derive(Clone)]
 pub struct AudioTracks {
     /// Audio tracks button + default rows shown (settings `audio_tracks_btn`).
     pub enabled: bool,

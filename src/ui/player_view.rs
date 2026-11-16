@@ -463,6 +463,13 @@ impl PlayerView {
             let resp = ui.allocate_rect(rect, Sense::click());
             if p.loaded {
                 ui.painter().add(p.video_callback(rect));
+                // after a resize the video is drawn scaled until the size settles: make sure a
+                // frame comes then, also when paused
+                let sid = egui::Id::new("video_rect_size");
+                if ui.data(|d| d.get_temp::<Vec2>(sid)) != Some(rect.size()) {
+                    ui.data_mut(|d| d.insert_temp(sid, rect.size()));
+                    ui.ctx().request_repaint_after(crate::player::video_gl::RESIZE_SETTLE + std::time::Duration::from_millis(20));
+                }
                 // Python's click watcher: a press on the video toggles play (a second one
                 // within 0.2 s is ignored); in fullscreen a double click (< 0.45 s) leaves
                 // fullscreen and undoes the first click's play/pause

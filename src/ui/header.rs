@@ -54,8 +54,15 @@ impl Header {
             stat(ui, &count);
             let size = lib.total_size.filter(|_| !lib.videos.is_empty()).map(fmt_size_total).unwrap_or_default();
             stat(ui, &size);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // fixed row height (pill = CTRL_H + 2px stroke): with an auto-growing row egui centres
+            // the first pill in the short initial row and the next ones in the grown row, so the
+            // pills ended up at different heights
+            let row = Vec2::new(ui.available_width(), theme::CTRL_H + 2.0);
+            ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
+                // the pills' inner `horizontal` rows start at this height; equal to the Ghost
+                // height so egui doesn't re-centre (and shift) them
+                ui.spacing_mut().interact_size.y = theme::CTRL_H - 4.0;
                 // far right: Folder | v
                 let mut arrow = None;
                 // (this layout runs right to left, so the pill's items are added last-first)

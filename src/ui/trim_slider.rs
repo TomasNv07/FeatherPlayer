@@ -106,6 +106,11 @@ impl TrimBar {
         }
     }
 
+    /// A press at `p` would grab a trim handle.
+    fn trim_visible_hit(&self, g: &Geo, p: Option<egui::Pos2>) -> bool {
+        self.trim_visible && p.is_some_and(|p| self.nearest_trim(g, p.x).is_some())
+    }
+
     fn snap_to_playhead(&self, g: &Geo, raw: f64) -> f64 {
         if (g.val_to_x(raw) - g.val_to_x(self.value)).abs() <= SNAP_PX { self.value } else { raw }
     }
@@ -118,11 +123,29 @@ impl TrimBar {
         let min_gap = if dur > 0.0 { (10000.0 / dur).floor().max(1.0) } else { 100.0 };
         let mut ev = Vec::new();
         let ptr = resp.interact_pointer_pos().or(resp.hover_pos());
+        // where the primary button really went down / up this frame: when a frame is slow the
+        // pointer has often moved on already, and the playhead must land on the clicked spot
+        let button_pos = |pressed: bool| {
+            ui.input(|i| {
+                i.events.iter().rev().find_map(|e| match e {
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: p, .. } if *p == pressed => Some(*pos),
+                    _ => None,
+                })
+            })
+        };
 
         // ---- input ----
-        if resp.is_pointer_button_down_on() && !self.is_dragging() {
+        // press and release inside one frame (a quick click on a slow frame): a whole seek
+        if resp.clicked() && !self.is_dragging() && !self.trim_visible_hit(&g, button_pos(true).or(ptr)) {
+            if let Some(p) = button_pos(false).or(ptr) {
+                self.value = self.x_to_val(&g, p.x);
+                ev.push(BarEvent::Press);
+                ev.push(BarEvent::Drag(self.value));
+                ev.push(BarEvent::Release(self.value));
+            }
+        } else if resp.is_pointer_button_down_on() && !self.is_dragging() {
             // press
-            if let Some(p) = ptr {
+            if let Some(p) = button_pos(true).or(ptr) {
                 let which = if self.trim_visible { self.nearest_trim(&g, p.x) } else { None };
                 if let Some(w) = which {
                     self.trim_drag = Some(w);
@@ -162,7 +185,8 @@ impl TrimBar {
             let was_trim = self.trim_drag.take().is_some();
             if self.dragging {
                 self.dragging = false;
-                if let Some(p) = ui.ctx().input(|i| i.pointer.latest_pos()) {
+                // the release spot, not where the pointer is now
+                if let Some(p) = button_pos(false) {
                     self.value = self.x_to_val(&g, p.x);
                 }
                 ev.push(BarEvent::Release(self.value));

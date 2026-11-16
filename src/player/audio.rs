@@ -39,10 +39,10 @@ pub fn build_graph(items: &[(i64, f64)]) -> (Option<i64>, String) {
 
 impl Player {
     /// Python `_read_track_list`: track-list as JSON text, audio entries only.
-    pub(super) fn read_tracks(&mut self) {
+    /// `raw` = the observed `track-list` JSON.
+    pub(super) fn read_tracks(&mut self, raw: &str) {
         self.tracks.clear();
-        let raw = self.core.get("track-list").unwrap_or_default();
-        let list: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        let list: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
         for t in list.as_array().into_iter().flatten() {
             if t.get("type").and_then(|v| v.as_str()) != Some("audio") {
                 continue;
@@ -61,7 +61,8 @@ impl Player {
     /// mpv's filter graph).
     pub(super) fn set_lavfi(&mut self, graph: &str) {
         if graph != self.lavfi_cur {
-            if let Err(e) = self.core.set("lavfi-complex", graph) {
+            // async: a blocking graph change waits for the video output (see Core::cmd_async)
+            if let Err(e) = self.core.set_async("lavfi-complex", graph) {
                 self.msg = e;
             }
             self.lavfi_cur = graph.to_owned();
@@ -75,17 +76,18 @@ impl Player {
         if items.is_empty() || !self.loaded {
             return;
         }
+        self.applied = Some(items.to_vec());
         // a clip that was just told where to start: that spot, not mpv's position yet
         let held = self.hold.filter(|(until, _)| Instant::now() < *until).map(|(_, t)| t);
-        let pos = held.or_else(|| self.core.getf("time-pos"));
+        let pos = held.or(self.obs_pos());
         let (aid, graph) = build_graph(items);
         self.set_lavfi(&graph);
         if let Some(a) = aid {
-            let _ = self.core.set("aid", &a.to_string());
+            let _ = self.core.set_async("aid", &a.to_string());
             self.aid_cur = a.to_string();
         }
         if let Some(p) = pos {
-            let _ = self.core.cmd(&["seek", &format!("{p}"), "absolute+exact"]);
+            let _ = self.core.cmd_async(&["seek", &format!("{p}"), "absolute+exact"]);
             let now = Instant::now();
             self.hold = Some((now + Duration::from_millis(400), p));
             self.audio_check = Some((now + Duration::from_millis(350), p, now));
@@ -100,8 +102,8 @@ impl Player {
             return;
         }
         self.audio_check = None;
-        let Some(now) = self.core.getf("time-pos") else { return };
-        let expect = if self.core.flag("pause") { pos } else { pos + t0.elapsed().as_secs_f64() };
+        let Some(now) = self.obs_pos() else { return };
+        let expect = if self.paused { pos } else { pos + t0.elapsed().as_secs_f64() };
         if (now - expect).abs() > 0.5 {
             let _ = self.core.cmd(&["seek", &format!("{expect}"), "absolute+exact"]);
         }

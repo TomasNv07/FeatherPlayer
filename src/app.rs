@@ -35,6 +35,20 @@ const RED: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x55, 0x55);
 
 pub struct FeatherApp {
     player: Result<Player, String>,
+    /// Second mpv instance that preloads the clip under the mouse (paused at its start point,
+    /// tracks applied); clicking that clip swaps it in, so it shows at once.
+    standby: Option<Player>,
+    /// What the standby player was opened with: (clip, start point).
+    preload: Option<(String, Start)>,
+    /// Clip card under the mouse and since when.
+    hover: Option<(String, Instant)>,
+    /// Audio track layout of every clip mpv has opened (this session), so its audio graph can
+    /// be set up before the file opens next time.
+    track_cache: HashMap<String, Vec<crate::player::audio::Track>>,
+    /// Video area size in pixels (off-screen renders use it, so a swap needs no re-allocate).
+    video_px: (i32, i32),
+    /// `track_cache` has new entries to save (at most every 2 s).
+    tracks_dirty: Option<Instant>,
     pb: Playback,
     prefs: Prefs,
     lib: Library,
@@ -166,6 +180,57 @@ fn tk_dir(p: PathBuf) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// Audio track layouts per clip (ffprobe / mpv), so a clip's audio mix can be set up before
+/// mpv opens it. Only the Rust app uses this file.
+fn track_cache_file() -> std::path::PathBuf {
+    prefs::data_dir().join("rs_audio_tracks.json")
+}
+
+fn load_track_cache() -> HashMap<String, Vec<crate::player::audio::Track>> {
+    let Ok(text) = std::fs::read_to_string(track_cache_file()) else { return HashMap::new() };
+    let Ok(Value::Object(m)) = serde_json::from_str::<Value>(&text) else { return HashMap::new() };
+    m.into_iter()
+        .filter(|(p, _)| std::path::Path::new(p).exists())
+        .filter_map(|(p, v)| {
+            let tracks = v
+                .as_array()?
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let s = |k: usize| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned();
+                    crate::player::audio::Track { id: i as i64 + 1, title: s(0), handler: s(1) }
+                })
+                .collect();
+            Some((p, tracks))
+        })
+        .collect()
+}
+
+fn save_track_cache(cache: &HashMap<String, Vec<crate::player::audio::Track>>) {
+    let m: serde_json::Map<String, Value> = cache.iter().map(|(p, tr)| (p.clone(), Value::Array(tr.iter().map(|t| serde_json::json!([t.title, t.handler])).collect()))).collect();
+    let tmp = track_cache_file().with_extension("json.tmp");
+    if std::fs::write(&tmp, Value::Object(m).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, track_cache_file());
+    }
+}
+
+/// Play these track items unless they are already what the player has (set up before the
+/// file opened, or by the preload). None = mpv's first track at 100 %.
+fn apply_if_changed(p: &mut Player, items: Option<Vec<(i64, f64)>>) {
+    if items == p.applied {
+        return;
+    }
+    match items {
+        Some(i) => p.apply_tracks(&i),
+        None => {
+            if let Some(first) = p.tracks.first().map(|t| t.id) {
+                p.apply_tracks(&[(first, 1.0)]);
+            }
+            p.applied = None;
+        }
+    }
+}
+
 impl FeatherApp {
     pub fn new(cc: &eframe::CreationContext<'_>, lib: Option<PathBuf>, file: Option<String>, minimized: bool) -> Self {
         theme::apply(&cc.egui_ctx);
@@ -182,6 +247,7 @@ impl FeatherApp {
             .and_then(|v| v.as_object())
             .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().filter(|s| SPEEDS.contains(s) && *s != 1.0).map(|s| (k.clone(), s))).collect())
             .unwrap_or_default();
+        let standby = Player::start(cc, lib.clone(), prefs.volume as f64).ok();
         let mut player = Player::start(cc, lib, prefs.volume as f64);
         let mut view = PlayerView::default();
         if let (Ok(p), Some(f)) = (&mut player, file) {
@@ -192,6 +258,12 @@ impl FeatherApp {
         let (bg_tx, bg_rx) = std::sync::mpsc::channel();
         let mut app = FeatherApp {
             player,
+            standby,
+            preload: None,
+            hover: None,
+            track_cache: load_track_cache(),
+            video_px: (1280, 720),
+            tracks_dirty: None,
             pb: Playback::new(st.get_bool("loop_clip", false)),
             lib: Library::new(step),
             scanner: Scanner::new(cc.egui_ctx.clone()),
@@ -342,6 +414,7 @@ impl FeatherApp {
             self.prefs.volume = p.volume.round() as i64;
             p.stop();
         }
+        self.release_preload(None);
         self.prefs.save();
         self.lib.current = None;
         self.tracks.clip_reset(None);
@@ -442,13 +515,13 @@ impl FeatherApp {
     /// the last scan) go first; `None` = everything at full speed.
     fn load_thumbs(&mut self, new: Option<&HashSet<String>>) {
         let visible: Vec<String> = self.lib.filtered(&self.prefs).into_iter().take(self.lib.visible_count).cloned().collect();
-        let todo: Vec<String> = visible.into_iter().filter(|v| !self.grid.thumbs.contains_key(v) || !self.prefs.has_duration(v)).collect();
+        let todo: Vec<String> = visible.into_iter().filter(|v| !self.grid.thumbs.contains_key(v) || !self.prefs.has_duration(v) || !self.track_cache.contains_key(v)).collect();
         let (prio, rest) = match new {
             Some(n) => todo.into_iter().partition(|v| n.contains(v)),
             None => (todo, Vec::new()),
         };
-        let prefs = &self.prefs;
-        self.scanner.load_thumbs(prio, rest, |p| !prefs.has_duration(p));
+        let (prefs, cache) = (&self.prefs, &self.track_cache);
+        self.scanner.load_thumbs(prio, rest, |p| !prefs.has_duration(p), |p| !cache.contains_key(p));
     }
 
     /// Python `_folder_watch_tick`: every 3 s look for clips added to / removed from the
@@ -600,6 +673,10 @@ impl FeatherApp {
                     self.prefs.save();
                 }
                 Msg::Thumb(t) => {
+                    if let Some(tr) = t.tracks {
+                        self.track_cache.insert(t.path.clone(), tr);
+                        self.tracks_dirty.get_or_insert_with(Instant::now);
+                    }
                     if let Some(d) = &t.dur {
                         if !self.prefs.has_duration(&t.path) {
                             self.prefs.set_duration(&t.path, d);
@@ -621,6 +698,14 @@ impl FeatherApp {
                 ctx.request_repaint_after(DUR_SAVE_DELAY - since.elapsed());
             }
         }
+        if let Some(since) = self.tracks_dirty {
+            if since.elapsed() >= DUR_SAVE_DELAY {
+                self.tracks_dirty = None;
+                save_track_cache(&self.track_cache);
+            } else {
+                ctx.request_repaint_after(DUR_SAVE_DELAY - since.elapsed());
+            }
+        }
         while let Ok(m) = self.media_rx.try_recv() {
             self.media_message(m);
         }
@@ -635,6 +720,7 @@ impl FeatherApp {
                         p.stop();
                     }
                 }
+                self.release_preload(Some(&path));
             }
             MediaMsg::TrimCopy(new, err) => {
                 // Python `_finish_trim_copy`
@@ -666,7 +752,7 @@ impl FeatherApp {
                 if self.lib.current.as_deref() == Some(path.as_str()) {
                     self.update_trim_mode();
                     if let Ok(p) = &mut self.player {
-                        p.open_clip(&path, Start::Beginning);
+                        p.open_clip(&path, Start::Beginning, None, true, None);
                     }
                     if let Ok(m) = std::fs::metadata(&path) {
                         self.view.now_playing_mb = format!("{:.1} MB", m.len() as f64 / (1024.0 * 1024.0));
@@ -743,23 +829,118 @@ impl FeatherApp {
         }
     }
 
+    /// Where a clip opens: trim start, the beginning, or the middle (Python `_play_index`).
+    fn start_for(&self, path: &str) -> Start {
+        match self.prefs.trim(path) {
+            Some((s, _)) if self.prefs.trim_enabled.contains(path) => Start::Trim(s),
+            _ if self.start_always || self.start_zero.contains(path) => Start::Beginning,
+            _ => Start::Middle,
+        }
+    }
+
+    /// The track items for `path` when its track layout is known (empty = mpv's first track).
+    fn preset_for(&self, path: &str) -> Option<Vec<(i64, f64)>> {
+        let tracks = self.track_cache.get(path)?;
+        let mut t = self.tracks.clone();
+        Some(t.on_tracks(Some(path), tracks).unwrap_or_default())
+    }
+
+    /// Preload the clip card that has been under the mouse for a moment into the standby
+    /// player, and keep that player's state up to date.
+    fn preload_tick(&mut self, ctx: &egui::Context) {
+        if self.standby.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        match (&self.grid.hovered, &self.hover) {
+            (Some(h), Some((cur, _))) if h == cur => {}
+            (h, _) => self.hover = h.clone().map(|h| (h, now)),
+        }
+        const DELAY: Duration = Duration::from_millis(120);
+        let mut open = None;
+        if let Some((h, since)) = &self.hover {
+            if self.lib.current.as_deref() != Some(h.as_str()) {
+                if now - *since < DELAY {
+                    ctx.request_repaint_after(DELAY - (now - *since));
+                } else {
+                    let start = self.start_for(h);
+                    if self.preload.as_ref() != Some(&(h.clone(), start)) {
+                        let dur = self.prefs.duration(h).and_then(scanner::parse_dur).filter(|d| *d > 0.0);
+                        open = Some((h.clone(), start, dur, self.preset_for(h)));
+                    }
+                }
+            }
+        }
+        let Some(sb) = &mut self.standby else { return };
+        if let Some((h, start, dur, preset)) = open {
+            sb.open_clip(&h, start, dur, false, preset.as_deref());
+            self.preload = Some((h, start));
+        }
+        sb.poll();
+        if sb.tracks_new {
+            // set up its tracks now (on a copy of the track state: the open clip keeps its own)
+            sb.tracks_new = false;
+            if let Some(path) = sb.path.clone() {
+                if self.track_cache.insert(path, sb.tracks.clone()).is_none() {
+                    self.tracks_dirty.get_or_insert_with(Instant::now);
+                }
+            }
+            let mut t = self.tracks.clone();
+            let items = t.on_tracks(sb.path.as_deref(), &sb.tracks);
+            apply_if_changed(sb, items);
+            sb.tracks_handled = true;
+        }
+        if self.preload.is_some() && !sb.tracks_handled {
+            ctx.request_repaint_after(Duration::from_millis(20)); // keep polling while it loads
+        }
+    }
+
+    /// The standby player lets go of `path` (file about to be changed or deleted).
+    fn release_preload(&mut self, path: Option<&str>) {
+        if let Some(sb) = &mut self.standby {
+            if path.is_none() || sb.path.as_deref() == path {
+                sb.stop();
+                self.preload = None;
+            }
+        }
+    }
+
     /// Python `_play_index`.
     fn play(&mut self, path: String) {
+        let start = self.start_for(&path);
         let Ok(p) = &mut self.player else { return };
         if self.lib.current.as_deref() == Some(path.as_str()) && p.playing() {
             return;
         }
-        let start = match self.prefs.trim(&path) {
-            Some((s, _)) if self.prefs.trim_enabled.contains(&path) => Start::Trim(s),
-            _ if self.start_always || self.start_zero.contains(&path) => Start::Beginning,
-            _ => Start::Middle,
-        };
         self.pb.reset_for_clip();
         self.tracks.clip_reset(Some(&path));
         self.view.close_audio_menu();
         // speed belongs to the clip: its own saved speed, otherwise 1x
-        p.set_speed(self.clip_speed.get(&path).copied().unwrap_or(1.0));
-        p.open_clip(&path, start);
+        let speed = self.clip_speed.get(&path).copied().unwrap_or(1.0);
+        let preloaded = self.preload.as_ref().is_some_and(|(pp, s)| *pp == path && *s == start)
+            && self.standby.as_ref().is_some_and(|s| s.path.as_deref() == Some(path.as_str()));
+        if let (true, Some(mut sb)) = (preloaded, self.standby.take()) {
+            // swap the preloaded player in; the old one lets go of its clip and waits
+            sb.set_volume(p.volume);
+            sb.set_speed(speed);
+            p.pause();
+            p.stop();
+            std::mem::swap(p, &mut sb);
+            self.standby = Some(sb);
+            self.preload = None;
+            if p.tracks_handled {
+                // the app's track state follows the new clip (same rules as the preload used)
+                let items = self.tracks.on_tracks(Some(&path), &p.tracks);
+                apply_if_changed(p, items);
+            }
+            p.start_when_ready();
+        } else {
+            p.set_speed(speed);
+            let known_dur = self.prefs.duration(&path).and_then(scanner::parse_dur).filter(|d| *d > 0.0);
+            let preset = self.track_cache.get(&path).map(|tr| self.tracks.clone().on_tracks(Some(&path), tr).unwrap_or_default());
+            let Ok(p) = &mut self.player else { return };
+            p.open_clip(&path, start, known_dur, true, preset.as_deref());
+        }
         let name = scanner::basename(&path);
         let info = self.lib.info.get(&path);
         let ts = info.and_then(|i| i.clip_dt).map(|d| d.format("%d.%m.%Y %H:%M").to_string()).unwrap_or_default();
@@ -1043,7 +1224,10 @@ impl FeatherApp {
             HeaderAction::Categorize => self.categorize = Some(CategorizeDialog::new(self.lib.current.as_deref())),
             HeaderAction::ShowInFolder => {
                 if let Some(p) = &self.lib.current {
-                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.replace('/', "\\"))).spawn();
+                    // raw_arg: `.arg()` would quote the whole "/select,path" (paths with spaces),
+                    // which explorer doesn't understand and opens Documents instead
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", p.replace('/', "\\"))).spawn();
                 }
             }
             HeaderAction::Compress => self.open_compress(),
@@ -1171,6 +1355,11 @@ impl FeatherApp {
                 p.stop();
                 std::thread::sleep(Duration::from_millis(400));
             }
+        }
+        // the preloaded clip is locked too
+        if self.standby.as_ref().and_then(|s| s.path.as_ref()).is_some_and(|sp| names.contains(sp)) {
+            self.release_preload(None);
+            std::thread::sleep(Duration::from_millis(200));
         }
         for path in &names {
             // the thumbnail name depends on size/date: work it out before the file goes
@@ -1477,7 +1666,20 @@ fn cut60(s: &str) -> String {
 }
 
 impl eframe::App for FeatherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // players that aren't on screen still have to render when mpv asks (else libmpv waits
+        // 200 ms per frame): the preloading one, and the open one while its clip loads
+        if let Some(gl) = frame.gl() {
+            let (w, h) = self.video_px;
+            if let Some(sb) = &self.standby {
+                sb.render_offscreen(gl, w, h);
+            }
+            if let Ok(p) = &self.player {
+                if !p.loaded {
+                    p.render_offscreen(gl, w, h);
+                }
+            }
+        }
         self.window_tick(ctx);
         self.handle_messages(ctx);
         if self.win.hidden {
@@ -1526,10 +1728,17 @@ impl eframe::App for FeatherApp {
             // Python _on_track_list_changed: the clip's tracks are known, play the chosen ones
             p.tracks_new = false;
             let path = p.path.clone();
-            if let Some(items) = self.tracks.on_tracks(path.as_deref(), &p.tracks) {
-                p.apply_tracks(&items);
+            if let Some(path) = &path {
+                if self.track_cache.insert(path.clone(), p.tracks.clone()).is_none() {
+                    self.tracks_dirty.get_or_insert_with(Instant::now);
+                }
             }
+            let items = self.tracks.on_tracks(path.as_deref(), &p.tracks);
+            apply_if_changed(p, items);
+            p.tracks_handled = true;
         }
+        // a clip opens paused and starts once its tracks are set up
+        p.autoplay_tick();
         self.pb.tick(p);
         // cloud sync every 5 s, also while the settings page is open
         self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
@@ -1569,6 +1778,7 @@ impl eframe::App for FeatherApp {
         let mut grid_acts = Vec::new();
         let mut header_acts = Vec::new();
         let mut view_acts = Vec::new();
+        self.grid.hovered = None; // set again by the clip list when it is shown
         if !fullscreen {
             // right: clip list (declared first so the header only spans the left side)
             let badges = Badges { audio: &self.tracks.badges };
@@ -1601,6 +1811,10 @@ impl eframe::App for FeatherApp {
         }
         let p = self.player.as_mut().unwrap();
         let video = self.view.video(ctx, p, &mut self.pb);
+        if video.width() > 16.0 && video.height() > 16.0 {
+            let ppp = ctx.pixels_per_point();
+            self.video_px = ((video.width() * ppp).round() as i32, (video.height() * ppp).round() as i32);
+        }
         if !fullscreen {
             self.fit_16_9(ctx, video, maximized);
         }
@@ -1648,6 +1862,7 @@ impl eframe::App for FeatherApp {
                 GridAction::RenameCategory(key) => self.rename = RenameDialog::new(&key, &self.lib),
             }
         }
+        self.preload_tick(ctx);
         self.dialogs(ctx);
     }
 
@@ -1663,6 +1878,9 @@ impl eframe::App for FeatherApp {
             self.prefs.volume = p.volume.round() as i64;
             self.prefs.save();
             p.shutdown(gl);
+        }
+        if let Some(sb) = &self.standby {
+            sb.shutdown(gl);
         }
     }
 }

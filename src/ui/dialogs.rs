@@ -65,6 +65,7 @@ impl RenameDialog {
         let mut open = true;
         let mut save = false;
         let resp = egui::Modal::new(egui::Id::new("rename_category")).frame(dialog_frame()).show(ctx, |ui| {
+            ui.set_max_width(BODY_W + 48.0);
             egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
                 ui.set_width(BODY_W);
                 heading(ui, "Category name");
@@ -155,6 +156,7 @@ impl CategorizeDialog {
         let mut save = false;
         let mut delete: Option<(String, String)> = None;
         let resp = egui::Modal::new(egui::Id::new("categorize")).frame(dialog_frame()).show(ctx, |ui| {
+            ui.set_max_width(BODY_W + 48.0);
             egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
                 ui.set_width(BODY_W);
                 heading(ui, "Keyword");
@@ -346,8 +348,23 @@ impl ConfirmDialog {
         let frame = egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, theme::border())).corner_radius(8).inner_margin(egui::Margin::ZERO);
         let resp = egui::Modal::new(egui::Id::new("confirm_dialog")).frame(frame).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // dialog width: the body (icon + 340 text column) or the button row, whichever is wider,
+            // so the title bar and accent line always span the whole dialog
+            let btn_w = |ui: &egui::Ui, t: &str, font: egui::FontId, padx: f32| widgets::text_width(ui, t, &font) + padx * 2.0;
+            let footer_w = if self.error {
+                btn_w(ui, "OK", theme::font_ui(), 18.0)
+            } else {
+                let mut w = btn_w(ui, "Cancel", theme::font_ui(), 16.0) + 8.0 + btn_w(ui, &self.yes_text, theme::font_bold(), 18.0);
+                for t in [&self.extra_text, &self.extra2_text].into_iter().flatten() {
+                    w += 8.0 + btn_w(ui, t, theme::font_bold(), 16.0);
+                }
+                w
+            } + 32.0;
+            let dw = footer_w.max(446.0).ceil();
+            let col_w = dw - 106.0; // minus 2x22 margin, 46 icon, 16 gap
+            ui.set_max_width(dw);
             // title bar like the main window: BG + accent line
-            let (bar, _) = ui.allocate_exact_size(Vec2::new(420.0, 37.0), egui::Sense::hover());
+            let (bar, _) = ui.allocate_exact_size(Vec2::new(dw, 37.0), egui::Sense::hover());
             ui.painter().rect_filled(bar, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, theme::bg());
             ui.painter().text(bar.left_center() + Vec2::new(16.0, 0.0), egui::Align2::LEFT_CENTER, &self.title, theme::font_bold(), theme::text_primary());
             let xr = egui::Rect::from_center_size(bar.right_center() - Vec2::new(6.0 + 18.5, 0.0), Vec2::new(37.0, 29.0));
@@ -359,7 +376,7 @@ impl ConfirmDialog {
             if x.clicked() {
                 res = Some(Confirm::No);
             }
-            let (line, _) = ui.allocate_exact_size(Vec2::new(420.0, 2.0), egui::Sense::hover());
+            let (line, _) = ui.allocate_exact_size(Vec2::new(dw, 2.0), egui::Sense::hover());
             ui.painter().rect_filled(line, 0.0, theme::accent());
             egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 20)).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
@@ -370,14 +387,14 @@ impl ConfirmDialog {
                     super::icons::paint(ui, b.center(), icon, 22.0, tone, false, 1.9);
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
-                        ui.set_width(340.0);
+                        ui.set_width(col_w);
                         ui.add(egui::Label::new(egui::RichText::new(&self.head).font(egui::FontId::new(11.0 * 96.0 / 72.0, theme::bold_family())).color(theme::text_primary())).wrap());
                         if !self.details.is_empty() {
                             ui.add_space(12.0);
                             egui::Frame::new().fill(c("#161628")).stroke(egui::Stroke::new(1.0_f32, theme::border())).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                                ui.set_width(316.0);
+                                ui.set_width(col_w - 24.0);
                                 for d in &self.details {
-                                    let t = widgets::ellipsize(ui, d, &theme::font_ui(), 310.0, true);
+                                    let t = widgets::ellipsize(ui, d, &theme::font_ui(), col_w - 30.0, true);
                                     ui.label(egui::RichText::new(t).font(theme::font_ui()).color(theme::text_muted()));
                                 }
                                 if self.more > 0 {
@@ -580,6 +597,8 @@ impl ShareDialog {
         let tw = 280.0;
         let th = (tw * 9.0 / 16.0_f32).floor();
         let resp = egui::Modal::new(egui::Id::new("share_dialog")).frame(dialog_frame()).show(ctx, |ui| {
+            // the right-to-left footer would otherwise stretch the modal to egui's default area width
+            ui.set_max_width(tw + 56.0);
             egui::Frame::new().inner_margin(egui::Margin::symmetric(28, 22)).show(ui, |ui| {
                 ui.set_width(tw);
                 ui.vertical_centered(|ui| {
@@ -747,6 +766,7 @@ impl CompressDialog {
         let n = self.targets.len();
         let tw = 280.0;
         let resp = egui::Modal::new(egui::Id::new("compress_dialog")).frame(dialog_frame()).show(ctx, |ui| {
+            ui.set_max_width(tw + 56.0);
             egui::Frame::new().inner_margin(egui::Margin::symmetric(28, 22)).show(ui, |ui| {
                 ui.set_width(tw);
                 ui.vertical_centered(|ui| {

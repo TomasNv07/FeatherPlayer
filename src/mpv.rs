@@ -20,8 +20,35 @@ pub const EV_NONE: c_int = 0;
 pub const EV_SHUTDOWN: c_int = 1;
 pub const EV_END_FILE: c_int = 7;
 pub const EV_FILE_LOADED: c_int = 8;
+pub const EV_PLAYBACK_RESTART: c_int = 21;
 
 const FORMAT_DOUBLE: c_int = 5;
+pub const FORMAT_STRING: c_int = 1;
+pub const FORMAT_FLAG: c_int = 3;
+pub const FORMAT_DBL: c_int = 5;
+pub const EV_PROPERTY_CHANGE: c_int = 22;
+
+#[repr(C)]
+struct EventProperty {
+    name: *const c_char,
+    format: c_int,
+    data: *mut c_void,
+}
+
+/// Value of an observed property (None = unavailable right now).
+#[derive(Debug, Clone)]
+pub enum PropVal {
+    None,
+    Double(f64),
+    Flag(bool),
+    Str(String),
+}
+
+/// One mpv event; `prop` is set for PROPERTY_CHANGE.
+pub struct Ev {
+    pub id: c_int,
+    pub prop: Option<(String, PropVal)>,
+}
 
 const RP_INVALID: c_int = 0;
 const RP_API_TYPE: c_int = 1;
@@ -65,6 +92,9 @@ pub struct Core {
     f_get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     f_free: unsafe extern "C" fn(*mut c_void),
     f_command: unsafe extern "C" fn(Handle, *mut *const c_char) -> c_int,
+    f_command_async: unsafe extern "C" fn(Handle, u64, *mut *const c_char) -> c_int,
+    f_set_property_async: unsafe extern "C" fn(Handle, u64, *const c_char, c_int, *mut c_void) -> c_int,
+    f_observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     f_wait_event: unsafe extern "C" fn(Handle, f64) -> *mut Event,
     f_terminate_destroy: unsafe extern "C" fn(Handle),
     f_error_string: unsafe extern "C" fn(c_int) -> *const c_char,
@@ -144,6 +174,9 @@ impl Core {
             f_get_property: sym!(b"mpv_get_property\0"),
             f_free: sym!(b"mpv_free\0"),
             f_command: sym!(b"mpv_command\0"),
+            f_command_async: sym!(b"mpv_command_async\0"),
+            f_set_property_async: sym!(b"mpv_set_property_async\0"),
+            f_observe_property: sym!(b"mpv_observe_property\0"),
             f_wait_event: sym!(b"mpv_wait_event\0"),
             f_terminate_destroy: sym!(b"mpv_terminate_destroy\0"),
             f_error_string: sym!(b"mpv_error_string\0"),
@@ -169,7 +202,8 @@ impl Core {
         unsafe { CStr::from_ptr((self.f_error_string)(code)).to_string_lossy().into_owned() }
     }
 
-    /// Create + initialise the mpv instance with the given options.
+    /// Create + initialise the mpv instance with the given options. A key starting with `?`
+    /// is optional: an older libmpv that doesn't know it just skips it.
     pub fn init(&self, options: &[(&str, &str)]) -> Result<(), String> {
         unsafe {
             let h = (self.f_create)();
@@ -177,9 +211,10 @@ impl Core {
                 return Err("mpv_create returned null".into());
             }
             for (k, v) in options {
-                let (k, v) = (CString::new(*k).unwrap(), CString::new(*v).unwrap());
+                let optional = k.starts_with('?');
+                let (k, v) = (CString::new(k.trim_start_matches('?')).unwrap(), CString::new(*v).unwrap());
                 let r = (self.f_set_option_string)(h, k.as_ptr(), v.as_ptr());
-                if r < 0 {
+                if r < 0 && !optional {
                     (self.f_terminate_destroy)(h);
                     return Err(format!("option {k:?}={v:?}: {}", self.err(r)));
                 }
@@ -227,12 +262,26 @@ impl Core {
 
     /// Render the current frame into `fbo` (w x h). GL thread only.
     pub fn render(&self, fbo: i32, w: i32, h: i32) -> bool {
+        self.render_inner(fbo, w, h, false)
+    }
+
+    /// Render only if mpv has a new frame waiting (MPV_RENDER_UPDATE_FRAME). For players that
+    /// aren't on screen (loading, preloading): libmpv's VO waits up to 200 ms for every frame
+    /// to be rendered, so a player nobody renders loads very slowly.
+    pub fn render_if_wanted(&self, fbo: i32, w: i32, h: i32) -> bool {
+        self.render_inner(fbo, w, h, true)
+    }
+
+    fn render_inner(&self, fbo: i32, w: i32, h: i32, only_if_wanted: bool) -> bool {
         let rc = self.render_ctx.load(Ordering::SeqCst);
         if rc.is_null() {
             return false;
         }
         unsafe {
-            (self.f_rc_update)(rc);
+            let flags = (self.f_rc_update)(rc);
+            if only_if_wanted && flags & 1 == 0 {
+                return false;
+            }
             let mut f = OpenGlFbo { fbo, w, h, internal_format: 0x8058 /* GL_RGBA8 */ };
             let mut flip: c_int = 1;
             let mut params = [
@@ -267,7 +316,15 @@ impl Core {
         }
     }
 
+    /// Commands are always sent async (see `cmd_async`): any blocking call from the UI thread
+    /// can wait on the video output, which waits for the UI thread to render (200 ms stalls).
     pub fn cmd(&self, args: &[&str]) -> Result<(), String> {
+        self.cmd_async(args)
+    }
+
+    /// Blocking command (only for shutdown-time use).
+    #[allow(dead_code)]
+    pub fn cmd_sync(&self, args: &[&str]) -> Result<(), String> {
         let h = self.handle();
         if h.is_null() {
             return Err("mpv not running".into());
@@ -279,7 +336,13 @@ impl Core {
         if r < 0 { Err(format!("{args:?}: {}", self.err(r))) } else { Ok(()) }
     }
 
+    /// Property sets are always async too (see `cmd`).
     pub fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        self.set_async(name, value)
+    }
+
+    #[allow(dead_code)]
+    pub fn set_sync(&self, name: &str, value: &str) -> Result<(), String> {
         let h = self.handle();
         if h.is_null() {
             return Err("mpv not running".into());
@@ -289,6 +352,38 @@ impl Core {
         if r < 0 { Err(format!("set {name}={value}: {}", self.err(r))) } else { Ok(()) }
     }
 
+    /// Queue a command without waiting for it. Use for anything that can make mpv's core wait
+    /// on the video output (stop, loadfile, audio graph changes, seeks): the VO needs the render
+    /// thread (= our UI thread) to render, so a blocking call there stalls until libmpv's
+    /// 200 ms timeout. Async requests are carried out in the order they were sent.
+    pub fn cmd_async(&self, args: &[&str]) -> Result<(), String> {
+        let h = self.handle();
+        if h.is_null() {
+            return Err("mpv not running".into());
+        }
+        let owned: Vec<CString> = args.iter().map(|a| CString::new(*a).unwrap()).collect();
+        let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        let r = unsafe { (self.f_command_async)(h, 0, ptrs.as_mut_ptr()) };
+        if r < 0 { Err(format!("{args:?}: {}", self.err(r))) } else { Ok(()) }
+    }
+
+    /// Set a property without waiting (see `cmd_async`). mpv copies the value right away.
+    pub fn set_async(&self, name: &str, value: &str) -> Result<(), String> {
+        let h = self.handle();
+        if h.is_null() {
+            return Err("mpv not running".into());
+        }
+        let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
+        let mut p: *const c_char = v.as_ptr();
+        const FORMAT_STRING: c_int = 1;
+        let r = unsafe { (self.f_set_property_async)(h, 0, n.as_ptr(), FORMAT_STRING, &mut p as *mut *const c_char as *mut c_void) };
+        if r < 0 { Err(format!("set {name}={value}: {}", self.err(r))) } else { Ok(()) }
+    }
+
+    // Blocking reads: not used per frame any more (observed properties instead, see
+    // `Player::poll`); kept for one-off use.
+    #[allow(dead_code)]
     pub fn get(&self, name: &str) -> Option<String> {
         let h = self.handle();
         if h.is_null() {
@@ -306,6 +401,7 @@ impl Core {
         }
     }
 
+    #[allow(dead_code)]
     pub fn getf(&self, name: &str) -> Option<f64> {
         let h = self.handle();
         if h.is_null() {
@@ -317,17 +413,49 @@ impl Core {
         if r < 0 { None } else { Some(v) }
     }
 
+    #[allow(dead_code)]
     pub fn flag(&self, name: &str) -> bool {
         self.get(name).map(|s| s == "yes").unwrap_or(false)
     }
 
-    /// Non-blocking event poll; returns the event id (EV_NONE when the queue is empty).
-    pub fn poll_event(&self) -> c_int {
+    /// Have mpv report changes of `name` as PROPERTY_CHANGE events (no blocking reads needed).
+    pub fn observe(&self, name: &str, format: c_int) {
+        let h = self.handle();
+        if !h.is_null() {
+            let n = CString::new(name).unwrap();
+            unsafe { (self.f_observe_property)(h, 0, n.as_ptr(), format) };
+        }
+    }
+
+    /// Non-blocking event poll (id EV_NONE when the queue is empty).
+    pub fn next_event(&self) -> Ev {
         let h = self.handle();
         if h.is_null() {
-            return EV_NONE;
+            return Ev { id: EV_NONE, prop: None };
         }
-        unsafe { (*(self.f_wait_event)(h, 0.0)).event_id }
+        unsafe {
+            let e = &*(self.f_wait_event)(h, 0.0);
+            let mut prop = None;
+            if e.event_id == EV_PROPERTY_CHANGE && !e.data.is_null() {
+                let p = &*(e.data as *const EventProperty);
+                let name = CStr::from_ptr(p.name).to_string_lossy().into_owned();
+                let v = if p.data.is_null() {
+                    PropVal::None
+                } else {
+                    match p.format {
+                        FORMAT_DBL => PropVal::Double(*(p.data as *const f64)),
+                        FORMAT_FLAG => PropVal::Flag(*(p.data as *const c_int) != 0),
+                        FORMAT_STRING => {
+                            let s = *(p.data as *const *const c_char);
+                            if s.is_null() { PropVal::None } else { PropVal::Str(CStr::from_ptr(s).to_string_lossy().into_owned()) }
+                        }
+                        _ => PropVal::None,
+                    }
+                };
+                prop = Some((name, v));
+            }
+            Ev { id: e.event_id, prop }
+        }
     }
 }
 

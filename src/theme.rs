@@ -434,6 +434,9 @@ pub fn restyle(ctx: &egui::Context) {
         s.text_styles.insert(egui::TextStyle::Body, font_ui());
         s.text_styles.insert(egui::TextStyle::Button, font_ui());
         s.text_styles.insert(egui::TextStyle::Small, font_tiny());
+        // floating scrollbars: thin until hovered, then wider than egui's default 10px
+        s.spacing.scroll.bar_width = 14.0;
+        s.spacing.scroll.floating_width = 4.0;
     });
 }
 
