@@ -1,7 +1,7 @@
 ﻿//! Settings page (Python `_build_settings_page`): replaces the main window while open.
-//! Ported so far: Starred clips, Cloud sync, Phone sync, Playback, Trimming, Clips (Recycle
-//! Bin), Audio, Window. Appearance, auto-refresh, Load more, thumbnail cache and the shortcut
-//! cards come with their features.
+//! All of Python's sections: Appearance (theme dropdown, accent colour picker), Starred clips,
+//! Cloud sync, Phone sync, Playback, Audio, Trimming, Clips, Window, and the Keyboard
+//! shortcuts / Hidden features cards.
 
 use super::widgets::{self, ellipsize, Ghost, Row};
 use crate::library::{Library, NONE_KEY};
@@ -35,6 +35,13 @@ pub enum SettingsAction {
     DefaultTrack(usize),
     /// Default volume of track n: (value, slider released).
     DefaultVol(usize, f64, bool),
+    Theme(String),
+    /// Custom accent for the active theme ("#rrggbb"), None = the theme's own.
+    Accent(Option<String>),
+    AutoRefresh(bool),
+    /// "Load more" step one choice down (-1) or up (+1).
+    SeeMore(i32),
+    ClearCache,
 }
 
 /// Values the page shows (the rest is read from `Cloud` / `Phone`).
@@ -49,11 +56,227 @@ pub struct SettingsValues<'a> {
     pub close_to_tray: bool,
     pub start_with_windows: bool,
     pub audio: &'a AudioTracks,
+    pub auto_refresh: bool,
+    pub see_more_step: usize,
+    /// Thumbnail cache line ("Calculating…", "N thumbnails • size for the current folder").
+    pub cache_info: &'a str,
 }
 
 #[derive(Default)]
 pub struct SettingsPage {
     games_popup: Option<Rect>,
+    /// Theme dropdown open, anchored to this field.
+    theme_popup: Option<Rect>,
+    accent: Option<AccentDialog>,
+}
+
+/// Python `_open_accent_dialog`: saturation/value square, hue bar, hex entry, preview.
+struct AccentDialog {
+    theme: String,
+    default: String,
+    h: f64,
+    s: f64,
+    v: f64,
+    hex: String,
+    /// SV square texture and the hue it was drawn for.
+    sv_tex: Option<(f64, egui::TextureHandle)>,
+    hue_tex: Option<egui::TextureHandle>,
+}
+
+const SVW: usize = 280;
+const SVH: usize = 170;
+
+impl AccentDialog {
+    fn new(theme: &str) -> AccentDialog {
+        let default = theme::default_accent(theme);
+        let start = theme::custom_accent(theme).unwrap_or_else(|| default.clone());
+        let (r, g, b) = theme::rgb_of(&start).unwrap_or((1.0, 0.0, 0.0));
+        let (h, s, v) = theme::rgb_to_hsv(r, g, b);
+        AccentDialog { theme: theme.to_owned(), default, h, s, v, hex: start.to_uppercase(), sv_tex: None, hue_tex: None }
+    }
+
+    fn hex_now(&self) -> String {
+        theme::hex_of(theme::hsv_to_rgb(self.h, self.s, self.v))
+    }
+
+    /// The typed hex if valid ("#" optional), else the picked colour.
+    fn chosen(&self) -> String {
+        let t = self.hex.trim();
+        let t = if t.starts_with('#') { t.to_owned() } else { format!("#{t}") };
+        if t.len() == 7 && theme::rgb_of(&t).is_some() { t.to_lowercase() } else { self.hex_now() }
+    }
+
+    /// Python `_sv_image`: white at the left, the pure hue at the right, black at the bottom.
+    fn sv_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        if let Some((h, t)) = &self.sv_tex {
+            if *h == self.h {
+                return t.clone();
+            }
+        }
+        let (br, bg, bb) = theme::hsv_to_rgb(self.h, 1.0, 1.0);
+        let mut px = Vec::with_capacity(SVW * SVH * 4);
+        for y in 0..SVH {
+            let dark = 1.0 - y as f64 / (SVH - 1) as f64;
+            for x in 0..SVW {
+                let k = x as f64 / (SVW - 1) as f64;
+                let ch = |base: f64| (((base * k + (1.0 - k)) * dark) * 255.0).round() as u8;
+                px.extend_from_slice(&[ch(br), ch(bg), ch(bb), 255]);
+            }
+        }
+        let img = egui::ColorImage::from_rgba_unmultiplied([SVW, SVH], &px);
+        let t = ctx.load_texture("accent_sv", img, egui::TextureOptions::LINEAR);
+        self.sv_tex = Some((self.h, t.clone()));
+        t
+    }
+
+    /// Python `_hue_bar_image`.
+    fn hue_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        self.hue_tex
+            .get_or_insert_with(|| {
+                let px: Vec<u8> = (0..SVW)
+                    .flat_map(|i| {
+                        let (r, g, b) = theme::hsv_to_rgb(i as f64 / (SVW - 1) as f64, 1.0, 1.0);
+                        [(r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8, 255]
+                    })
+                    .collect();
+                let img = egui::ColorImage::from_rgba_unmultiplied([SVW, 1], &px);
+                ctx.load_texture("accent_hue", img, egui::TextureOptions::LINEAR)
+            })
+            .clone()
+    }
+
+    /// Some(Some(colour or None)) when saved / reset, Some(None) when cancelled.
+    fn show(&mut self, ctx: &egui::Context) -> Option<Option<Option<String>>> {
+        let mut out = None;
+        let sv = self.sv_texture(ctx);
+        let hue = self.hue_texture(ctx);
+        let frame = egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, c("#33335a"))).corner_radius(10).inner_margin(egui::Margin::ZERO);
+        let resp = egui::Modal::new(egui::Id::new("accent_dialog")).frame(frame).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)).show(ui, |ui| {
+                ui.label(egui::RichText::new(format!("Accent color for {}", self.theme)).font(theme::font_ui()).color(theme::text_primary()));
+                ui.add_space(12.0);
+                // saturation / value square
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(SVW as f32, SVH as f32), Sense::click_and_drag());
+                egui::Image::new(&sv).corner_radius(8).paint_at(ui, r);
+                if resp.hovered() || resp.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                if resp.is_pointer_button_down_on() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        self.s = (((p.x - r.left()) / (SVW - 1) as f32) as f64).clamp(0.0, 1.0);
+                        self.v = 1.0 - (((p.y - r.top()) / (SVH - 1) as f32) as f64).clamp(0.0, 1.0);
+                        self.hex = self.hex_now().to_uppercase();
+                    }
+                }
+                let m = Pos2::new(r.left() + self.s as f32 * (SVW - 1) as f32, r.top() + (1.0 - self.v as f32) * (SVH - 1) as f32);
+                ui.painter().circle_stroke(m, 8.0, egui::Stroke::new(1.0_f32, Color32::BLACK));
+                ui.painter().circle_stroke(m, 6.5, egui::Stroke::new(2.0_f32, Color32::WHITE));
+                ui.add_space(10.0);
+                // hue bar
+                let (hr, hresp) = ui.allocate_exact_size(Vec2::new(SVW as f32, 22.0), Sense::click_and_drag());
+                let bar = Rect::from_center_size(hr.center(), Vec2::new(SVW as f32, 12.0));
+                egui::Image::new(&hue).corner_radius(6).paint_at(ui, bar);
+                if hresp.hovered() || hresp.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                if hresp.is_pointer_button_down_on() {
+                    if let Some(p) = hresp.interact_pointer_pos() {
+                        self.h = (((p.x - hr.left()) / (SVW - 1) as f32) as f64).clamp(0.0, 1.0);
+                        self.hex = self.hex_now().to_uppercase();
+                    }
+                }
+                let x = (hr.left() + self.h as f32 * (SVW - 1) as f32).clamp(hr.left() + 3.0, hr.right() - 3.0);
+                ui.painter().rect_filled(Rect::from_min_max(Pos2::new(x - 3.0, hr.top() + 1.0), Pos2::new(x + 3.0, hr.bottom() - 1.0)), 3.0, Color32::BLACK);
+                ui.painter().rect_filled(Rect::from_min_max(Pos2::new(x - 2.0, hr.top() + 2.0), Pos2::new(x + 2.0, hr.bottom() - 2.0)), 2.0, Color32::WHITE);
+                ui.add_space(14.0);
+                // preview, hex entry, theme default
+                ui.horizontal(|ui| {
+                    ui.set_width(SVW as f32);
+                    let (pr, _) = ui.allocate_exact_size(Vec2::new(44.0, 30.0), Sense::hover());
+                    ui.painter().rect_filled(pr, 8.0, c("#52527e"));
+                    ui.painter().rect_filled(pr.shrink(1.0), 7.0, theme::raw(&self.hex_now()));
+                    ui.add_space(12.0);
+                    let before = self.hex.clone();
+                    widgets::entry(ui, &mut self.hex, 90.0);
+                    if self.hex != before {
+                        // Python `on_entry`: a valid hex moves the picker
+                        let t = self.hex.trim();
+                        let t = if t.starts_with('#') { t.to_owned() } else { format!("#{t}") };
+                        if t.len() == 7 {
+                            if let Some((r, g, b)) = theme::rgb_of(&t) {
+                                let (h, s, v) = theme::rgb_to_hsv(r, g, b);
+                                if s > 0.0 && v > 0.0 {
+                                    self.h = h;
+                                }
+                                self.s = s;
+                                self.v = v;
+                            }
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(format!("Theme default  {}", self.default.to_uppercase())).font(theme::font_tiny()).color(theme::text_dim()));
+                    });
+                });
+            });
+            let (d, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().rect_filled(d, 0.0, c("#2A2A4A"));
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if widgets::rounded_button(ui, "Use theme default", theme::text_muted(), c("#242444"), c("#2A2A4A"), theme::font_ui(), 10.0, 6.0).clicked() {
+                        out = Some(Some(None));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::rounded_button(ui, "Cancel", theme::text_primary(), c("#242444"), c("#2A2A4A"), theme::font_ui(), 14.0, 6.0).clicked() {
+                            out = Some(None);
+                        }
+                        ui.add_space(6.0);
+                        if widgets::rounded_button(ui, "Save", theme::accent_fg(), theme::accent(), c("#FF5C8D"), theme::font_bold(), 14.0, 6.0).clicked() {
+                            out = Some(Some(self.save_value()));
+                        }
+                    });
+                });
+            });
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                out = Some(Some(self.save_value()));
+            }
+        });
+        if out.is_none() && resp.should_close() {
+            out = Some(None);
+        }
+        out
+    }
+
+    /// Python `_save`: the theme's own accent counts as "no custom accent".
+    fn save_value(&self) -> Option<String> {
+        let chosen = self.chosen();
+        (chosen != self.default).then_some(chosen)
+    }
+}
+
+/// Python `_paint_swatch`: the theme's three colours as small circles.
+fn paint_swatch(ui: &egui::Ui, left: f32, cy: f32, name: &str) {
+    for (i, col) in theme::swatch_colors(name).into_iter().enumerate() {
+        let ctr = Pos2::new(left + 1.0 + i as f32 * 15.0 + 7.0, cy);
+        ui.painter().circle_filled(ctr, 7.0, col);
+        ui.painter().circle_stroke(ctr, 7.0, egui::Stroke::new(1.0_f32, c("#52527e")));
+    }
+}
+
+/// Python `_hint_card`: one row per item with the keys in a small box on the right.
+fn hint_card(ui: &mut egui::Ui, title: &str, items: &[(&str, &str, &str)]) {
+    section(ui, title, |ui| {
+        for (i, (keys, label, desc)) in items.iter().enumerate() {
+            if i > 0 {
+                divider(ui);
+            }
+            row(ui, label, desc, |ui| {
+                egui::Frame::new().fill(c("#161628")).inner_margin(egui::Margin::symmetric(9, 4)).show(ui, |ui| {
+                    ui.label(egui::RichText::new(*keys).font(theme::font_tiny()).color(theme::text_primary()));
+                });
+            });
+        }
+    });
 }
 
 /// Python `ToggleSwitch` (42x24), returns true when clicked.
@@ -162,6 +385,7 @@ impl SettingsPage {
     pub fn show(&mut self, ctx: &egui::Context, v: &SettingsValues, cloud: &Cloud, phone: &mut Phone, lib: &Library) -> Vec<SettingsAction> {
         let mut acts = Vec::new();
         let mut games_btn = Rect::NOTHING;
+        let mut theme_field = Rect::NOTHING;
         // top bar: back + "Settings"
         egui::TopBottomPanel::top("settings_top").frame(egui::Frame::new().fill(theme::bg()).inner_margin(egui::Margin::symmetric(16, 10))).show_separator_line(false).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -185,6 +409,54 @@ impl SettingsPage {
                         ui.set_width(col_w);
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         let path_text = |ui: &egui::Ui, p: &str| if p.is_empty() { "No folder chosen yet".to_owned() } else { ellipsize(ui, p, &theme::font_tiny(), 330.0, false) };
+
+                        let cur = theme::active_name();
+                        section(ui, "APPEARANCE", |ui| {
+                            row(ui, "Theme", "Choose a color scheme for the app", |ui| {
+                                let r = egui::Frame::new().fill(c("#161628")).stroke(egui::Stroke::new(1.0_f32, theme::border())).corner_radius(8).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        // right to left: name button, swatch
+                                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                        let b = Ghost::new(&cur).font(theme::font_ui()).fg(theme::text_primary()).arrow().width(150.0).show(ui);
+                                        let (sw, _) = ui.allocate_exact_size(Vec2::new(47.0, theme::CTRL_H - 4.0), Sense::hover());
+                                        paint_swatch(ui, sw.left(), sw.center().y, &cur);
+                                        ui.add_space(8.0);
+                                        b
+                                    })
+                                    .inner
+                                });
+                                theme_field = r.response.rect;
+                                if r.inner.clicked() {
+                                    self.theme_popup = if self.theme_popup.is_some() { None } else { Some(r.response.rect) };
+                                }
+                            });
+                            divider(ui);
+                            let ov = theme::custom_accent(&cur);
+                            let desc = if ov.is_some() { format!("Custom accent for {cur}") } else { format!("Using the {cur} theme's own accent") };
+                            row(ui, "Accent color", &desc, |ui| {
+                                field(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                        // right to left: [Reset |] hex, swatch
+                                        if ov.is_some() {
+                                            if Ghost::new("Reset").icon("refresh", 16.0).font(theme::font_ui()).fg(theme::text_primary()).padx(10.0).show(ui).on_hover_text("Go back to the theme's own accent").clicked() {
+                                                acts.push(SettingsAction::Accent(None));
+                                            }
+                                            widgets::pill_divider(ui);
+                                        }
+                                        let shown = ov.clone().unwrap_or_else(|| theme::default_accent(&cur)).to_uppercase();
+                                        if Ghost::new(&shown).font(theme::font_ui()).fg(theme::text_primary()).padx(10.0).show(ui).on_hover_text("Pick a custom accent color").clicked() {
+                                            self.accent = Some(AccentDialog::new(&cur));
+                                        }
+                                        let (sw, _) = ui.allocate_exact_size(Vec2::new(24.0, theme::CTRL_H - 4.0), Sense::hover());
+                                        let ctr = Pos2::new(sw.left() + 12.0, sw.center().y);
+                                        ui.painter().circle_filled(ctr, 7.0, theme::accent());
+                                        ui.painter().circle_stroke(ctr, 7.0, egui::Stroke::new(1.0_f32, c("#52527e")));
+                                        ui.add_space(8.0);
+                                    });
+                                });
+                            });
+                        });
 
                         section(ui, "STARRED CLIPS", |ui| {
                             row(ui, "Copy starred clips to a folder", "When you star a clip, a copy is saved to the folder below", |ui| {
@@ -370,6 +642,37 @@ impl SettingsPage {
                                     acts.push(SettingsAction::RecycleBin(!v.recycle_bin));
                                 }
                             });
+                            divider(ui);
+                            row(ui, "Auto-refresh the folder", "New clips show up on their own once a recording finishes", |ui| {
+                                if toggle(ui, v.auto_refresh) {
+                                    acts.push(SettingsAction::AutoRefresh(!v.auto_refresh));
+                                }
+                            });
+                            divider(ui);
+                            row(ui, "Clips added by \"Load more\"", "How many more clips load each time you press Load more", |ui| {
+                                field(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                        // right to left: +, number, -
+                                        if Ghost::new("+").font(theme::font_ui()).fg(theme::text_primary()).padx(12.0).show(ui).clicked() {
+                                            acts.push(SettingsAction::SeeMore(1));
+                                        }
+                                        let (r, _) = ui.allocate_exact_size(Vec2::new(44.0, theme::CTRL_H - 4.0), Sense::hover());
+                                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, v.see_more_step.to_string(), theme::font_bold(), theme::text_primary());
+                                        if Ghost::new("\u{2212}").font(theme::font_ui()).fg(theme::text_primary()).padx(12.0).show(ui).clicked() {
+                                            acts.push(SettingsAction::SeeMore(-1));
+                                        }
+                                    });
+                                });
+                            });
+                            divider(ui);
+                            row(ui, "Thumbnail cache", v.cache_info, |ui| {
+                                field(ui, |ui| {
+                                    if Ghost::new("Clear cache").icon("trash", 16.0).font(theme::font_ui()).fg(theme::text_primary()).padx(12.0).show(ui).clicked() {
+                                        acts.push(SettingsAction::ClearCache);
+                                    }
+                                });
+                            });
                         });
 
                         section(ui, "WINDOW", |ui| {
@@ -391,6 +694,20 @@ impl SettingsPage {
                                 }
                             });
                         });
+
+                        hint_card(ui, "KEYBOARD SHORTCUTS", &[
+                            ("Space", "Play / pause", "Pause or resume the open clip"),
+                            ("\u{2190}", "Newer clip", "Jump to the next newer clip in the current filter"),
+                            ("\u{2192}", "Older clip", "Jump to the next older clip in the current filter"),
+                            ("M", "Mute / unmute", "Mute or unmute the volume"),
+                            ("Esc", "Close settings or a popup", "Also closes the theme and cloud game lists"),
+                            ("Ctrl + Q", "Quit completely", "Quits even when the close button hides to the tray"),
+                        ]);
+                        hint_card(ui, "HIDDEN FEATURES", &[
+                            ("Right-click clip", "Select clips for deleting", "Hold and drag over clips to select several"),
+                            ("Right-click game", "Pick several games", "In the game list: adds or removes it and keeps the list open"),
+                            ("Middle-click game", "Rename a game", "In the game list: renames that category"),
+                        ]);
                         ui.add_space(26.0);
                     });
                 });
@@ -434,8 +751,60 @@ impl SettingsPage {
                 }
             }
         }
+        // theme dropdown (Python `_toggle_theme_popup` + `ThemeRow`)
+        if let Some(anchor) = self.theme_popup {
+            let width = anchor.width().max(210.0);
+            let pos = Pos2::new(anchor.right() - width, anchor.bottom() + 4.0);
+            let cur = theme::active_name();
+            let mut picked = None;
+            let rect = widgets::popup(ctx, "theme_popup", pos, width, |ui| {
+                for name in theme::THEME_ORDER {
+                    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+                    let active = name == cur;
+                    let hl = r.shrink(1.0);
+                    if resp.hovered() {
+                        ui.painter().rect_filled(hl, 7.0, c("#2c2c50"));
+                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                    } else if active {
+                        ui.painter().rect_filled(hl, 7.0, c("#2A2A4A"));
+                    }
+                    paint_swatch(ui, r.left() + 11.0, r.center().y, name);
+                    let fg = if resp.hovered() || active { Color32::WHITE } else { theme::text_muted() };
+                    ui.painter().text(Pos2::new(r.left() + 12.0 + 47.0 + 8.0, r.center().y), egui::Align2::LEFT_CENTER, name, theme::font_ui(), fg);
+                    if active {
+                        super::icons::paint(ui, Pos2::new(r.right() - 16.0, r.center().y), "check", 12.0, theme::accent(), false, 2.4);
+                    }
+                    if resp.clicked() {
+                        picked = Some(name);
+                    }
+                }
+            });
+            if let Some(name) = picked {
+                self.theme_popup = None;
+                if name != cur {
+                    acts.push(SettingsAction::Theme(name.to_owned()));
+                }
+            } else if ctx.input(|i| i.pointer.any_pressed()) {
+                if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                    if !rect.contains(p) && !theme_field.contains(p) {
+                        self.theme_popup = None;
+                    }
+                }
+            }
+        }
+        if let Some(d) = &mut self.accent {
+            if let Some(res) = d.show(ctx) {
+                self.accent = None;
+                if let Some(color) = res {
+                    acts.push(SettingsAction::Accent(color));
+                }
+            }
+            return acts; // the dialog handles Escape itself
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.games_popup.is_some() {
+            if self.theme_popup.is_some() {
+                self.theme_popup = None;
+            } else if self.games_popup.is_some() {
                 self.games_popup = None;
             } else {
                 acts.push(SettingsAction::Close);

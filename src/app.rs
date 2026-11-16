@@ -72,6 +72,36 @@ pub struct FeatherApp {
     confirm_cloud_delete: Option<ConfirmDialog>,
     error_dialog: Option<ConfirmDialog>,
     win: Win,
+    /// Settings `auto_refresh` (Python `_folder_watch_tick`).
+    auto_refresh: bool,
+    /// A folder scan has finished at least once (Python `_loaded_once`).
+    loaded_once: bool,
+    watch: Watch,
+    bg_tx: Sender<BgMsg>,
+    bg_rx: Receiver<BgMsg>,
+    /// Settings "Thumbnail cache" line and how many files it counted.
+    cache_info: String,
+    cache_count: usize,
+    confirm_cache: Option<ConfirmDialog>,
+    /// Thumbnails were cleared: reload them when Settings closes (Python `_thumbs_dirty`).
+    thumbs_dirty: bool,
+}
+
+/// Results from background threads.
+enum BgMsg {
+    /// Folder watch scan: (path, size) of every clip file.
+    Watch(Vec<(String, u64)>),
+    /// Cache info text + file count.
+    CacheInfo(String, usize),
+    CacheCleared,
+}
+
+/// Python `_folder_watch_tick` / `_watch_apply` state.
+struct Watch {
+    next: Instant,
+    busy: bool,
+    prev: HashMap<String, u64>,
+    last_trigger: Option<std::collections::BTreeSet<String>>,
 }
 
 /// Main-window state (step 8): title bar, tray, close/quit, remembered size.
@@ -135,6 +165,7 @@ impl FeatherApp {
             view.now_playing = scanner::basename(&f).to_owned();
         }
         let (media_tx, media_rx) = std::sync::mpsc::channel();
+        let (bg_tx, bg_rx) = std::sync::mpsc::channel();
         let mut app = FeatherApp {
             player,
             pb: Playback::new(st.get_bool("loop_clip", false)),
@@ -168,6 +199,16 @@ impl FeatherApp {
             confirm_cloud_delete: None,
             error_dialog: None,
             prefs,
+            auto_refresh: st.get_bool("auto_refresh", true),
+            loaded_once: false,
+            // Python: first check 4 s after start, then every 3 s
+            watch: Watch { next: Instant::now() + Duration::from_secs(4), busy: false, prev: HashMap::new(), last_trigger: None },
+            bg_tx,
+            bg_rx,
+            cache_info: "Calculating\u{2026}".into(),
+            cache_count: 0,
+            confirm_cache: None,
+            thumbs_dirty: false,
             win: Win {
                 hwnd,
                 titlebar: TitleBar::default(),
@@ -377,7 +418,135 @@ impl FeatherApp {
         self.scanner.load_thumbs(prio, rest, |p| !prefs.has_duration(p));
     }
 
+    /// Python `_folder_watch_tick`: every 3 s look for clips added to / removed from the
+    /// folders (in the background), only while the window is shown.
+    fn folder_watch_tick(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if now < self.watch.next {
+            ctx.request_repaint_after(self.watch.next - now);
+            return;
+        }
+        self.watch.next = now + Duration::from_secs(3);
+        ctx.request_repaint_after(Duration::from_secs(3));
+        if !(self.auto_refresh && self.loaded_once && !self.watch.busy) || self.win.hidden || window::is_iconic(self.win.hwnd) {
+            return;
+        }
+        let paths: Vec<String> = self.prefs.checked_folders.iter().filter(|p| std::path::Path::new(p).is_dir()).cloned().collect();
+        if paths.is_empty() {
+            return;
+        }
+        self.watch.busy = true;
+        let (tx, ctx) = (self.bg_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let sig = sync::scan_sig(&paths, "").into_iter().map(|(p, size, _)| (p, size)).collect();
+            let _ = tx.send(BgMsg::Watch(sig));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Python `_watch_apply`: refresh once the set of clips changed and every new clip has
+    /// stopped growing (a recording that is still being written keeps getting bigger).
+    fn watch_apply(&mut self, sig: Vec<(String, u64)>) {
+        self.watch.busy = false;
+        let sig: HashMap<String, u64> = sig.into_iter().collect();
+        let prev = std::mem::replace(&mut self.watch.prev, sig.clone());
+        let cur: std::collections::BTreeSet<String> = sig.keys().cloned().collect();
+        let known: std::collections::BTreeSet<String> = self.lib.videos.iter().cloned().collect();
+        if cur == known {
+            self.watch.last_trigger = None;
+            return;
+        }
+        if cur.difference(&known).any(|p| prev.get(p) != sig.get(p) || sig[p] == 0) {
+            return;
+        }
+        if self.watch.last_trigger.as_ref() == Some(&cur) {
+            return; // already refreshed for exactly this state
+        }
+        self.watch.last_trigger = Some(cur);
+        self.load_folders(true);
+    }
+
+    /// Python `_refresh_cache_info` (background): thumbnails of the loaded clips.
+    fn refresh_cache_info(&mut self) {
+        self.cache_info = "Calculating\u{2026}".into();
+        let videos = self.lib.videos.clone();
+        let (tx, ctx) = (self.bg_tx.clone(), self.egui_ctx.clone());
+        std::thread::spawn(move || {
+            let dir = scanner::cache_dir();
+            let files: Vec<u64> = videos.iter().filter_map(|v| scanner::cache_key(v)).filter_map(|k| std::fs::metadata(dir.join(k)).ok()).filter(|m| m.is_file()).map(|m| m.len()).collect();
+            let total: u64 = files.iter().sum();
+            let n = files.len();
+            let txt = if videos.is_empty() {
+                "No folder loaded".to_owned()
+            } else if n == 0 {
+                "No cached thumbnails for the current folder".to_owned()
+            } else {
+                let size = if total >= 1 << 30 {
+                    format!("{:.2} GB", total as f64 / (1u64 << 30) as f64)
+                } else if total >= 1 << 20 {
+                    format!("{:.1} MB", total as f64 / (1u64 << 20) as f64)
+                } else {
+                    format!("{} KB", (total / 1024).max(1))
+                };
+                format!("{n} thumbnail{} \u{2022} {size} for the current folder", if n != 1 { "s" } else { "" })
+            };
+            let _ = tx.send(BgMsg::CacheInfo(txt, n));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Python `_clear_thumbnail_cache` (after the question): delete them in the background.
+    fn clear_thumbnail_cache(&mut self) {
+        let videos = self.lib.videos.clone();
+        let (tx, ctx) = (self.bg_tx.clone(), self.egui_ctx.clone());
+        std::thread::spawn(move || {
+            let dir = scanner::cache_dir();
+            for k in videos.iter().filter_map(|v| scanner::cache_key(v)) {
+                let _ = std::fs::remove_file(dir.join(k));
+            }
+            let _ = tx.send(BgMsg::CacheCleared);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Python `_nav_clip`: Left = newer, Right = older clip in the current filter; with no
+    /// clip open (or the open one filtered out) the first one.
+    fn nav_clip(&mut self, step: i32) {
+        let list: Vec<String> = self.lib.filtered(&self.prefs).into_iter().cloned().collect();
+        if list.is_empty() {
+            return;
+        }
+        let pos = self.lib.current.as_ref().and_then(|c| list.iter().position(|v| v == c));
+        match pos {
+            None => self.play(list[0].clone()),
+            Some(i) => {
+                let j = i as i64 + step as i64;
+                if j >= 0 && (j as usize) < list.len() {
+                    self.play(list[j as usize].clone());
+                }
+            }
+        }
+    }
+
+    fn handle_bg(&mut self) {
+        while let Ok(m) = self.bg_rx.try_recv() {
+            match m {
+                BgMsg::Watch(sig) => self.watch_apply(sig),
+                BgMsg::CacheInfo(t, n) => {
+                    self.cache_info = t;
+                    self.cache_count = n;
+                }
+                BgMsg::CacheCleared => {
+                    self.grid.thumbs.clear();
+                    self.thumbs_dirty = true; // reloaded when Settings closes
+                    self.refresh_cache_info();
+                }
+            }
+        }
+    }
+
     fn handle_messages(&mut self, ctx: &egui::Context) {
+        self.handle_bg();
         while let Ok(m) = self.scanner.rx.try_recv() {
             match m {
                 Msg::Scan(r) => {
@@ -385,6 +554,7 @@ impl FeatherApp {
                         continue; // superseded by a newer refresh
                     }
                     let auto = self.auto_scans.remove(&r.scan_id);
+                    self.loaded_once = true;
                     let new: HashSet<String> = self.lib.apply_scan(r, &mut self.prefs, auto).into_iter().collect();
                     let current: HashSet<&String> = self.lib.videos.iter().collect();
                     self.grid.thumbs.retain(|k, _| current.contains(k));
@@ -777,6 +947,7 @@ impl FeatherApp {
                 }
                 self.settings_open = true;
                 self.win.startup_on = window::startup_enabled();
+                self.refresh_cache_info();
             }
         }
         let _ = ctx;
@@ -917,7 +1088,45 @@ impl FeatherApp {
 
     fn settings_action(&mut self, ctx: &egui::Context, a: SettingsAction) {
         match a {
-            SettingsAction::Close => self.settings_open = false,
+            SettingsAction::Close => {
+                self.settings_open = false;
+                if std::mem::take(&mut self.thumbs_dirty) {
+                    self.load_thumbs(None);
+                }
+            }
+            SettingsAction::Theme(name) => {
+                theme::switch_theme(ctx, &name);
+                window::apply_dark_frame(self.win.hwnd, theme::bg());
+            }
+            SettingsAction::Accent(color) => {
+                theme::set_custom_accent(ctx, &theme::active_name(), color.as_deref());
+                window::apply_dark_frame(self.win.hwnd, theme::bg());
+            }
+            SettingsAction::AutoRefresh(on) => {
+                // Python `_on_auto_refresh_toggle`
+                self.auto_refresh = on;
+                prefs::save_setting("auto_refresh", Value::Bool(on));
+                self.watch.last_trigger = None;
+            }
+            SettingsAction::SeeMore(dir) => {
+                // Python `_change_see_more`: nearest step, then one up / down
+                let cur = self.lib.see_more_step as i64;
+                let i = (0..SEE_MORE_STEPS.len()).min_by_key(|k| (SEE_MORE_STEPS[*k] as i64 - cur).abs()).unwrap_or(1) as i32;
+                let i = (i + dir).clamp(0, SEE_MORE_STEPS.len() as i32 - 1) as usize;
+                self.lib.see_more_step = SEE_MORE_STEPS[i];
+                prefs::save_setting("see_more_step", Value::from(SEE_MORE_STEPS[i]));
+            }
+            SettingsAction::ClearCache => {
+                if !self.lib.videos.is_empty() && self.cache_count > 0 {
+                    self.confirm_cache = Some(ConfirmDialog {
+                        title: "Clear thumbnail cache".into(),
+                        head: format!("Are you sure you want to delete the cached thumbnails for the {} clips in the current folder?", self.lib.videos.len()),
+                        note: "They're recreated automatically the next time they're needed. Your clips aren't touched.".into(),
+                        yes_text: "Clear".into(),
+                        ..Default::default()
+                    });
+                }
+            }
             SettingsAction::StarCopy(on) => {
                 self.prefs.star_copy_enabled = on;
                 self.prefs.save();
@@ -1087,6 +1296,14 @@ impl FeatherApp {
                 }
             }
         }
+        if let Some(d) = &self.confirm_cache {
+            if let Some(choice) = d.show(ctx) {
+                self.confirm_cache = None;
+                if choice == Confirm::Yes {
+                    self.clear_thumbnail_cache();
+                }
+            }
+        }
         if let Some(d) = &self.error_dialog {
             if d.show(ctx).is_some() {
                 self.error_dialog = None;
@@ -1197,6 +1414,7 @@ impl eframe::App for FeatherApp {
         // cloud sync every 5 s, also while the settings page is open
         self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
         ctx.request_repaint_after(Duration::from_secs(5));
+        self.folder_watch_tick(ctx);
 
         if self.settings_open {
             let star_folder = self.prefs.star_copy_folder.clone();
@@ -1211,6 +1429,9 @@ impl eframe::App for FeatherApp {
                 close_to_tray: self.win.close_to_tray,
                 start_with_windows: self.win.startup_on,
                 audio: &self.tracks,
+                auto_refresh: self.auto_refresh,
+                see_more_step: self.lib.see_more_step,
+                cache_info: &self.cache_info,
             };
             let acts = self.settings.show(ctx, &v, &self.cloud, &mut self.phone, &self.lib);
             for a in acts {
@@ -1220,7 +1441,9 @@ impl eframe::App for FeatherApp {
             return;
         }
         let p = self.player.as_mut().unwrap();
-        self.view.input(ctx, p, &mut self.pb);
+        if let Some(step) = self.view.input(ctx, p, &mut self.pb) {
+            self.nav_clip(step);
+        }
 
         // right: clip list (declared first so the header only spans the left side)
         let badges = Badges { audio: &self.tracks.badges };

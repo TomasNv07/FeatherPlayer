@@ -34,7 +34,6 @@ const THEMES: [ThemeDef; 8] = [
     t("Obsidian", 0.0, 0.0, 0.85, -0.050, "#00C9A7"),
     t("Mocha", 28.0, 0.55, 1.0, 0.0, "#D4A373"),
 ];
-#[allow(dead_code)] // the theme picker (settings) uses it
 pub const THEME_ORDER: [&str; 8] = ["Obsidian", "Midnight", "Graphite", "Ocean", "Forest", "Ember", "Amethyst", "Mocha"];
 pub const DEFAULT_THEME: &str = "Obsidian";
 
@@ -190,7 +189,6 @@ fn accent_override(settings: &serde_json::Map<String, Value>, theme: &str) -> Op
 // ---- active theme ---------------------------------------------------------------------------
 
 struct Active {
-    #[allow(dead_code)]
     name: String,
     map: HashMap<u32, Color32>,
 }
@@ -214,7 +212,6 @@ pub fn set_active(name: &str) {
     *ACTIVE.write().unwrap() = Some(Arc::new(Active { name: name.to_owned(), map }));
 }
 
-#[allow(dead_code)]
 pub fn active_name() -> String {
     ACTIVE.read().unwrap().as_ref().map(|a| a.name.clone()).unwrap_or_else(|| DEFAULT_THEME.into())
 }
@@ -224,6 +221,109 @@ pub fn c(hex: &str) -> Color32 {
     let Some((r, g, b)) = parse_hex(hex) else { return Color32::MAGENTA };
     let a = ACTIVE.read().unwrap();
     a.as_ref().and_then(|a| a.map.get(&key(r, g, b)).copied()).unwrap_or(Color32::from_rgb(r, g, b))
+}
+
+// ---- theme picker / accent colour (Settings > Appearance) -----------------------------------
+
+/// Python `_theme_swatch_colors`: background, surface and accent of a theme (its custom
+/// accent included).
+pub fn swatch_colors(name: &str) -> [Color32; 3] {
+    let ov = accent_override(&prefs::read_settings(), name);
+    let m = build_theme_map(name, ov.as_deref());
+    let col = |k: &str| m.get(k).and_then(|v| parse_hex(v)).map(|(r, g, b)| Color32::from_rgb(r, g, b)).unwrap_or(Color32::BLACK);
+    [col("#0f0f1a"), col("#242444"), col(BASE_ACCENT)]
+}
+
+/// The theme's own accent ("#rrggbb", lower case).
+pub fn default_accent(name: &str) -> String {
+    THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0]).accent.to_lowercase()
+}
+
+/// The custom accent saved for a theme, if any.
+pub fn custom_accent(name: &str) -> Option<String> {
+    accent_override(&prefs::read_settings(), name)
+}
+
+/// Python `_apply_theme`: switch live and save settings `theme`.
+pub fn switch_theme(ctx: &egui::Context, name: &str) {
+    set_active(name);
+    restyle(ctx);
+    prefs::save_setting("theme", Value::String(active_name()));
+}
+
+/// Python `_set_accent_override`: save (or clear, with None) one theme's custom accent and
+/// apply it live when that theme is active.
+pub fn set_custom_accent(ctx: &egui::Context, name: &str, color: Option<&str>) {
+    let mut st = prefs::read_settings();
+    let mut ov = st.get("accent_overrides").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    match color {
+        Some(c) => {
+            ov.insert(name.to_owned(), Value::String(c.to_lowercase()));
+        }
+        None => {
+            ov.remove(name);
+        }
+    }
+    st.insert("accent_overrides".into(), Value::Object(ov));
+    prefs::write_settings(&st);
+    if name == active_name() {
+        set_active(name);
+        restyle(ctx);
+    }
+}
+
+/// colorsys.rgb_to_hsv
+pub fn rgb_to_hsv(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let maxc = r.max(g).max(b);
+    let minc = r.min(g).min(b);
+    if minc == maxc {
+        return (0.0, 0.0, maxc);
+    }
+    let s = (maxc - minc) / maxc;
+    let rc = (maxc - r) / (maxc - minc);
+    let gc = (maxc - g) / (maxc - minc);
+    let bc = (maxc - b) / (maxc - minc);
+    let h = if r == maxc {
+        bc - gc
+    } else if g == maxc {
+        2.0 + rc - bc
+    } else {
+        4.0 + gc - rc
+    };
+    ((h / 6.0).rem_euclid(1.0), s, maxc)
+}
+
+/// colorsys.hsv_to_rgb
+pub fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    if s == 0.0 {
+        return (v, v, v);
+    }
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match (i as i64).rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    }
+}
+
+/// "#rrggbb" (lower case) from 0..1 floats, rounded like Python.
+pub fn hex_of(rgb: (f64, f64, f64)) -> String {
+    rgb_to_hex(rgb)
+}
+
+/// 0..1 floats from "#rrggbb" (None if it isn't one).
+pub fn rgb_of(hex: &str) -> Option<(f64, f64, f64)> {
+    parse_hex(hex).map(|(r, g, b)| (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0))
+}
+
+/// A literal colour, NOT translated through the theme (picked colours, swatches).
+pub fn raw(hex: &str) -> Color32 {
+    parse_hex(hex).map(|(r, g, b)| Color32::from_rgb(r, g, b)).unwrap_or(Color32::MAGENTA)
 }
 
 // ---- palette (Python globals) ---------------------------------------------------------------

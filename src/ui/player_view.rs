@@ -103,35 +103,35 @@ impl PlayerView {
         self.flash = Some((text.into(), color, Instant::now() + Duration::from_millis(3500)));
     }
 
-    /// Keyboard and dropped files. Call before the panels.
-    pub fn input(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback) {
+    /// Keyboard (Python's main-window bindings) and dropped files. Call before the panels.
+    /// Returns -1 / +1 for Left / Right (newer / older clip, Python `_nav_clip`).
+    pub fn input(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback) -> Option<i32> {
         if let Some(f) = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone())) {
             p.open(&f.to_string_lossy());
             self.now_playing = crate::scanner::basename(&f.to_string_lossy()).to_owned();
             self.now_playing_mb.clear();
         }
-        if !p.loaded || ctx.wants_keyboard_input() {
-            return;
+        if ctx.wants_keyboard_input() {
+            return None; // typing in a text field
         }
         let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
-        if key(egui::Key::Space) {
+        let mut nav = None;
+        if key(egui::Key::Space) && p.loaded {
             pb.toggle_play(p);
         }
         if key(egui::Key::ArrowLeft) {
-            p.seek_to(p.pos - 5.0);
+            nav = Some(-1);
         }
         if key(egui::Key::ArrowRight) {
-            p.seek_to(p.pos + 5.0);
+            nav = Some(1);
         }
-        if key(egui::Key::ArrowUp) {
-            self.set_volume(p, p.volume + 5.0);
-        }
-        if key(egui::Key::ArrowDown) {
-            self.set_volume(p, p.volume - 5.0);
+        if key(egui::Key::M) {
+            self.toggle_mute(p);
         }
         if key(egui::Key::F) {
             toggle_fullscreen(ctx);
         }
+        nav
     }
 
     /// Python `_set_volume`: moving the slider to 0 counts as muted, away from 0 unmutes.

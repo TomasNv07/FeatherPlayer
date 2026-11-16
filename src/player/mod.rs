@@ -159,14 +159,6 @@ impl Player {
         }
     }
 
-    pub fn seek_to(&mut self, secs: f64) {
-        let t = secs.clamp(0.0, self.dur.max(0.0));
-        let _ = self.core.cmd(&["seek", &format!("{t}"), "absolute+exact"]);
-        self.pos = t;
-        self.hold = Some((Instant::now() + Duration::from_millis(400), t));
-        self.eof = false;
-    }
-
     pub fn pause(&mut self) {
         let _ = self.core.set("pause", "yes");
         self.paused = true;
