@@ -1,7 +1,7 @@
 //! Header above the video: "ALL CLIPS  • count  • size", the Folder pill (with the saved
 //! folders dropdown) and the actions pill. Ported from FeatherPlayer `_build_ui` (hdr) and
-//! `_open_folder_dropdown`. Only Refresh is in the actions pill so far; the other actions
-//! (delete, categorize, show in folder, share, compress, settings) come with their features.
+//! `_open_folder_dropdown`. Actions pill like Python: delete, categorize, show in folder,
+//! share, compress, refresh, settings.
 
 use super::widgets::{self, Ghost, Row};
 use crate::library::{fmt_size_total, Library};
@@ -20,6 +20,7 @@ pub enum HeaderAction {
     Refresh,
     Categorize,
     ShowInFolder,
+    Share,
     Compress,
     ApplyTrim,
     Delete,
@@ -76,7 +77,7 @@ impl Header {
                     self.dropdown = Some(a);
                 }
                 ui.add_space(8.0);
-                // actions (right to left): Delete | Categorize | Show in folder | Compress | Refresh | Settings
+                // actions (right to left): Delete | Categorize | Show in folder | Share | Compress | Refresh | Settings
                 widgets::pill_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -90,6 +91,10 @@ impl Header {
                         widgets::pill_divider(ui);
                         if Ghost::new("").icon("compress", 18.0).padx(8.0).show(ui).on_hover_text("Compress clips").clicked() {
                             acts.push(HeaderAction::Compress);
+                        }
+                        widgets::pill_divider(ui);
+                        if Ghost::new("").icon("share", 18.0).padx(8.0).show(ui).on_hover_text("Share").clicked() {
+                            acts.push(HeaderAction::Share);
                         }
                         widgets::pill_divider(ui);
                         if Ghost::new("").icon("folder", 18.0).padx(8.0).show(ui).on_hover_text("Show in folder").clicked() {

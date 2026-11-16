@@ -467,6 +467,318 @@ fn compress_one(src: &str, nominal_mb: u32, ff: &Path, ctl: &CompressCtl, progre
     Ok(dst)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Share (Python `_open_share_dialog` encode + `_share_audio_args`)
+// ---------------------------------------------------------------------------------------------
+
+/// Python `get_audio_handlers`: handler names of the audio streams, None if ffprobe failed.
+pub fn audio_handlers(path: &str, ff: &Path) -> Option<Vec<String>> {
+    let out = probe(ff, &["-v", "error", "-select_streams", "a", "-show_entries", "stream_tags=handler_name", "-of", "json", path])?;
+    let v: serde_json::Value = serde_json::from_str(if out.trim().is_empty() { "{}" } else { &out }).ok()?;
+    let streams = v.get("streams").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    Some(streams.iter().map(|s| s.get("tags").and_then(|t| t.get("handler_name")).and_then(|h| h.as_str()).unwrap_or("").to_owned()).collect())
+}
+
+/// Python `_share_audio_args`: the selected tracks mixed into ONE track at their volumes
+/// (most players, Discord too, only play the first track). One track at 100 % is copied
+/// (`aac` re-encodes it). SteelSeries Game+Mic clips mix like playback does.
+pub fn share_audio_args(src: &str, snap: &crate::tracks::AudioSnap, aac: bool, abr: &str, ff: &Path) -> Vec<String> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    let Some(handlers) = audio_handlers(src, ff) else {
+        // no ffprobe: keep everything
+        return if aac { s(&["-map", "0:v:0?", "-map", "0:a?", "-c:a", "aac", "-b:a", abr]) } else { s(&["-map", "0:v:0?", "-map", "0:a?", "-c:a", "copy"]) };
+    };
+    let count = handlers.len();
+    if count == 0 {
+        return s(&["-map", "0:v:0?"]);
+    }
+    let (sel, vols): (Vec<usize>, &std::collections::BTreeMap<usize, f64>) = if count >= 2 && handlers.iter().any(|h| h == "Game") && handlers.iter().any(|h| h == "Mic") {
+        let gm: Vec<usize> = handlers.iter().enumerate().filter(|(_, h)| *h == "Game" || *h == "Mic").map(|(i, _)| i + 1).collect();
+        let sel: Vec<usize> = snap.sel.clone().unwrap_or_else(|| gm.clone()).into_iter().filter(|n| *n <= count).collect();
+        (if sel.is_empty() { gm } else { sel }, &snap.ov)
+    } else {
+        let sel: Vec<usize> = snap.sel.clone().unwrap_or_else(|| snap.defaults.clone()).into_iter().filter(|n| *n <= count).collect();
+        let sel = if sel.is_empty() {
+            let d: Vec<usize> = snap.defaults.iter().copied().filter(|n| *n <= count).collect();
+            if d.is_empty() { vec![1] } else { d }
+        } else {
+            sel
+        };
+        (sel, &snap.vol)
+    };
+    let vol = |n: usize| vols.get(&n).copied().unwrap_or(1.0);
+    let mut args = s(&["-map", "0:v:0?"]);
+    if sel.len() == 1 && (vol(sel[0]) - 1.0).abs() < 0.005 {
+        args.extend(["-map".to_owned(), format!("0:a:{}", sel[0] - 1)]);
+        args.extend(if aac { s(&["-c:a", "aac", "-b:a", abr]) } else { s(&["-c:a", "copy"]) });
+        return args;
+    }
+    let (mut parts, mut labels) = (Vec::new(), String::new());
+    for (k, &n) in sel.iter().enumerate() {
+        let v = vol(n);
+        if (v - 1.0).abs() < 0.005 {
+            labels.push_str(&format!("[0:a:{}]", n - 1));
+        } else {
+            parts.push(format!("[0:a:{}]volume={v:.3}[v{k}]", n - 1));
+            labels.push_str(&format!("[v{k}]"));
+        }
+    }
+    let graph = if sel.len() == 1 {
+        let p = &parts[0];
+        format!("{}[ao]", &p[..p.rfind('[').unwrap_or(p.len())])
+    } else {
+        let n = sel.len();
+        parts.push(format!("{labels}amix=inputs={n}:duration=longest,volume={n}[ao]"));
+        parts.join(";")
+    };
+    args.extend(["-filter_complex".to_owned(), graph, "-map".into(), "[ao]".into(), "-c:a".into(), "aac".into(), "-b:a".into(), abr.into()]);
+    args
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum SharePhase {
+    #[default]
+    Encoding,
+    Ready,
+    Error,
+}
+
+/// What the Share dialog shows; written by the encode thread.
+#[derive(Default)]
+pub struct ShareState {
+    pub phase: SharePhase,
+    pub status: String,
+    pub progress: Option<f32>,
+    pub encoding: bool,
+    /// The finished file (in its own temp folder), None while encoding.
+    pub output: Option<String>,
+    pub work_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Default)]
+pub struct ShareCtl {
+    pub state: Arc<Mutex<ShareState>>,
+    pub closed: Arc<AtomicBool>,
+    pub proc: Arc<Mutex<Option<Child>>>,
+}
+
+impl ShareCtl {
+    /// Python `_on_close`: kill the encode, delete the temp file and its folder.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        if let Some(c) = self.proc.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
+        let mut st = self.state.lock().unwrap();
+        if let Some(o) = st.output.take() {
+            let _ = std::fs::remove_file(o);
+        }
+        if let Some(d) = st.work_dir.take() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+pub struct ShareJob {
+    pub src: String,
+    pub t_start: f64,
+    pub t_end: f64,
+    /// None = "Original" (copy), Some(9.5) = "10 MB".
+    pub mb_lim: Option<f64>,
+    /// ".mp4" for an .mkv source, else the source's extension.
+    pub ext: String,
+    pub ffmpeg: PathBuf,
+    pub snap: crate::tracks::AudioSnap,
+}
+
+/// Python `_start_encode` (the thread part). Always writes into a private temp folder,
+/// never into the clips folder.
+pub fn start_share(job: ShareJob, ctl: ShareCtl, ctx: eframe::egui::Context) {
+    {
+        let mut st = ctl.state.lock().unwrap();
+        if st.encoding {
+            return;
+        }
+        st.encoding = true;
+        if let Some(o) = st.output.take() {
+            let _ = std::fs::remove_file(o);
+        }
+        if let Some(d) = st.work_dir.take() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        st.phase = SharePhase::Encoding;
+        st.status = "Preparing\u{2026}".into();
+        st.progress = Some(0.0);
+    }
+    std::thread::spawn(move || {
+        let set = |phase: SharePhase, text: &str, progress: Option<f32>| {
+            let mut st = ctl.state.lock().unwrap();
+            st.phase = phase;
+            st.status = text.to_owned();
+            st.progress = progress;
+            drop(st);
+            ctx.request_repaint();
+        };
+        let result = run_share(&job, &ctl, &|f| set(SharePhase::Encoding, "Encoding\u{2026}", Some(f)));
+        let mut st = ctl.state.lock().unwrap();
+        st.encoding = false;
+        match result {
+            Ok((tmp, dir)) if !ctl.closed.load(Ordering::SeqCst) => {
+                let mb = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) as f64 / 1024.0 / 1024.0;
+                st.output = Some(tmp);
+                st.work_dir = Some(dir);
+                st.phase = SharePhase::Ready;
+                st.status = format!("Ready  \u{2022}  {mb:.1} MB");
+                st.progress = Some(1.0);
+            }
+            Ok((tmp, dir)) => {
+                let _ = std::fs::remove_file(tmp);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            Err(dir) => {
+                if let Some(d) = dir {
+                    st.work_dir = Some(d);
+                }
+                st.phase = SharePhase::Error;
+                st.status = "Encoding failed".into();
+                st.progress = None;
+            }
+        }
+        drop(st);
+        ctx.request_repaint();
+    });
+}
+
+/// A fresh private temp folder (Python `tempfile.mkdtemp(prefix="FeatherShare_")`).
+fn make_work_dir() -> Option<PathBuf> {
+    let base = std::env::temp_dir();
+    for i in 0..100u32 {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        let d = base.join(format!("FeatherShare_{}_{:08x}{i}", std::process::id(), nanos));
+        if std::fs::create_dir(&d).is_ok() {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Ok((file, folder)) or Err(folder to clean up).
+fn run_share(job: &ShareJob, ctl: &ShareCtl, progress: &dyn Fn(f32)) -> Result<(String, PathBuf), Option<PathBuf>> {
+    let dir = make_work_dir().ok_or(None)?;
+    let tmp = dir.join(format!("encoding{}", job.ext)).to_string_lossy().into_owned();
+    let ff = &job.ffmpeg;
+    let clip_dur = (job.t_end - job.t_start).max(0.1);
+    let (ss, to) = (job.t_start.to_string(), job.t_end.to_string());
+    let input = |a: &mut Vec<String>| a.extend(["-y", "-ss", &ss, "-to", &to, "-i", &job.src].iter().map(|s| s.to_string()));
+    // runs ffmpeg; progress 0.05..0.95 from "time=" (output time, which starts at 0)
+    let encode = |args: Vec<String>| -> bool {
+        if ctl.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let Ok(mut child) = hidden(Command::new(ff).args(&args)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() else { return false };
+        let mut err = child.stderr.take();
+        *ctl.proc.lock().unwrap() = Some(child);
+        let re = Regex::new(r"time=(\d+):(\d+):(\d+\.?\d*)").unwrap();
+        let (mut buf, mut chunk) = (String::new(), [0u8; 512]);
+        if let Some(e) = err.as_mut() {
+            while let Ok(k) = e.read(&mut chunk) {
+                if k == 0 {
+                    break;
+                }
+                buf.push_str(&String::from_utf8_lossy(&chunk[..k]));
+                if let Some(c) = re.captures_iter(&buf).last() {
+                    let cur = c[1].parse::<f64>().unwrap_or(0.0) * 3600.0 + c[2].parse::<f64>().unwrap_or(0.0) * 60.0 + c[3].parse::<f64>().unwrap_or(0.0);
+                    progress(0.05 + 0.9 * (cur / clip_dur).clamp(0.0, 1.0) as f32);
+                }
+                if buf.len() > 4096 {
+                    buf.drain(..buf.len() - 512);
+                }
+            }
+        }
+        let status = ctl.proc.lock().unwrap().take().and_then(|mut c| c.wait().ok());
+        status.is_some_and(|s| s.success())
+    };
+    progress(0.05);
+    let ok = match job.mb_lim {
+        None => {
+            // video copied; audio copied when it can be, else re-encoded as aac
+            let faststart = matches!(job.ext.as_str(), ".mp4" | ".m4v" | ".mov");
+            let mut ok = false;
+            for aac in [false, true] {
+                let aud = share_audio_args(&job.src, &job.snap, aac, "160k", ff);
+                let mut a = Vec::new();
+                input(&mut a);
+                a.extend(aud.iter().cloned());
+                a.extend(["-c:v".to_owned(), "copy".into()]);
+                if faststart {
+                    a.extend(["-movflags".to_owned(), "+faststart".into()]);
+                }
+                a.push(tmp.clone());
+                ok = encode(a);
+                if ok || ctl.closed.load(Ordering::SeqCst) || aac || !aud.iter().any(|x| x == "copy") {
+                    break;
+                }
+            }
+            ok
+        }
+        Some(target_mb) => {
+            // single pass capped with maxrate/bufsize; NVENC first, then libx264
+            let audio_bits = 160_000.0;
+            let video_bits = ((target_mb * 8.0 * 1024.0 * 1024.0 / clip_dur - audio_bits) as i64).max(200_000) as u64;
+            let bufsize = video_bits * 2;
+            let (sw, sh, sfps) = video_info(&job.src, ff);
+            let mut scale = None;
+            if sw > 0 && sh > 0 {
+                let fps = if sfps > 0.0 { sfps } else { 30.0 };
+                let ref_bps = |w: f64, h: f64| w * h * fps * (0.07 * 0.4);
+                if (video_bits as f64) < ref_bps(sw as f64, sh as f64) {
+                    let mut new_h = sh;
+                    for h in [1080u32, 720, 540, 480, 360, 240] {
+                        if h >= sh {
+                            continue;
+                        }
+                        new_h = h;
+                        if video_bits as f64 >= ref_bps(sw as f64 * h as f64 / sh as f64, h as f64) {
+                            break;
+                        }
+                    }
+                    if new_h < sh {
+                        scale = Some(format!("scale=-2:{new_h}"));
+                    }
+                }
+            }
+            let aud = share_audio_args(&job.src, &job.snap, true, "160k", ff);
+            let (vb, bs) = (video_bits.to_string(), bufsize.to_string());
+            let build = |codec: &[&str]| {
+                let mut a = Vec::new();
+                input(&mut a);
+                a.extend(aud.iter().cloned());
+                a.extend(codec.iter().map(|s| s.to_string()));
+                if let Some(s) = &scale {
+                    a.extend(["-vf".to_owned(), s.clone()]);
+                }
+                a.extend(["-b:v", &vb, "-maxrate", &vb, "-bufsize", &bs, "-movflags", "+faststart", &tmp].iter().map(|s| s.to_string()));
+                a
+            };
+            let mut ok = false;
+            if NVENC_OK.load(Ordering::SeqCst) {
+                ok = encode(build(&["-c:v", "h264_nvenc", "-preset", "fast", "-rc", "vbr"]));
+                NVENC_OK.store(ok, Ordering::SeqCst);
+            }
+            if !ok {
+                ok = encode(build(&["-c:v", "libx264", "-preset", "veryfast"]));
+            }
+            ok
+        }
+    };
+    if ok && Path::new(&tmp).is_file() {
+        Ok((tmp, dir))
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        Err(Some(dir))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

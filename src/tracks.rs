@@ -11,6 +11,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// (mpv track id, volume) pairs to play.
 pub type Items = Vec<(i64, f64)>;
 
+/// Python `_at_export_snapshot`: the tracks/volumes to share for a clip.
+#[derive(Clone, Debug, Default)]
+pub struct AudioSnap {
+    /// Selected track numbers, None = the default tracks.
+    pub sel: Option<Vec<usize>>,
+    /// Volume of tracks 1..6 (own or default).
+    pub vol: BTreeMap<usize, f64>,
+    /// The clip's own volumes only.
+    pub ov: BTreeMap<usize, f64>,
+    /// Settings default tracks.
+    pub defaults: Vec<usize>,
+}
+
 pub struct AudioTracks {
     /// Audio tracks button + default rows shown (settings `audio_tracks_btn`).
     pub enabled: bool,
@@ -339,6 +352,31 @@ impl AudioTracks {
         prefs::save_setting("default_audio_volumes", Value::Object(m));
         let follows = self.ctl && self.sel.as_ref().is_some_and(|s| !s.is_empty()) && !self.vol.contains_key(&n);
         follows.then(|| self.items())
+    }
+
+    /// Python `_at_export_snapshot`: the open clip's live state, otherwise what is saved.
+    pub fn export_snapshot(&self, src: &str) -> AudioSnap {
+        if self.path.as_deref() == Some(src) && self.ctl {
+            if let Some(sel) = self.sel.as_ref().filter(|s| !s.is_empty()) {
+                return AudioSnap {
+                    sel: Some(sel.iter().copied().collect()),
+                    vol: (1..=6).map(|n| (n, self.eff_vol(n))).collect(),
+                    ov: self.vol.clone(),
+                    defaults: self.defaults.clone(),
+                };
+            }
+        }
+        let ov = self.clip_vol.get(src).cloned().unwrap_or_default();
+        AudioSnap {
+            sel: self.clip_sel.get(src).map(|v| {
+                let mut v = v.clone();
+                v.sort();
+                v
+            }),
+            vol: (1..=6).map(|n| (n, ov.get(&n).or_else(|| self.def_vol.get(&n)).copied().unwrap_or(1.0))).collect(),
+            ov,
+            defaults: self.defaults.clone(),
+        }
     }
 
     /// Python `_copy_clip_settings` (audio part): a new file made from a clip keeps its

@@ -160,6 +160,37 @@ pub fn set_app_id() {
     unsafe { windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
 }
 
+// ── Clipboard ────────────────────────────────────────────────────────────────
+
+/// Python `_copy_to_clipboard`: put the file on the clipboard as a file (CF_HDROP), so it can
+/// be pasted into Discord or Explorer. True on success.
+pub fn copy_file_to_clipboard(path: &str) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    // DROPFILES header: pFiles = 20, pt = (0, 0), fNC = 0, fWide = 1; then the path + "\0\0"
+    let mut data: Vec<u8> = [20u32, 0, 0, 0, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    data.extend(path.encode_utf16().chain([0, 0]).flat_map(|u| u.to_le_bytes()));
+    unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, data.len());
+        if hmem.is_null() {
+            return false;
+        }
+        let ptr = GlobalLock(hmem) as *mut u8;
+        if ptr.is_null() {
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        GlobalUnlock(hmem);
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let ok = !SetClipboardData(15, hmem as _).is_null(); // CF_HDROP
+        CloseClipboard();
+        ok
+    }
+}
+
 // ── Start with Windows (per-user Run key, no admin needed) ───────────────────
 
 /// Python `_startup_command`: --minimized makes the app start in the tray.

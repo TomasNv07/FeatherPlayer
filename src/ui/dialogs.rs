@@ -438,6 +438,283 @@ impl ConfirmDialog {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Share (Python `_open_share_dialog`)
+// ---------------------------------------------------------------------------------------------
+
+const SHARE_SIZES: [(&str, Option<f64>); 2] = [("Original", None), ("10 MB", Some(9.5))];
+
+pub struct ShareDialog {
+    src: String,
+    t_start: f64,
+    t_end: f64,
+    ext: String,
+    ffmpeg: std::path::PathBuf,
+    snap: crate::tracks::AudioSnap,
+    thumb: Option<egui::TextureHandle>,
+    selected: usize,
+    name: String,
+    default_stem: String,
+    ctl: crate::media::ShareCtl,
+    /// The finished file got the typed name (Python `_finish` -> `_apply_name`).
+    named: bool,
+    /// "Copied!" / "Failed" on the copy button until then.
+    copy_msg: Option<(&'static str, std::time::Instant)>,
+}
+
+/// Python `_safe_stem`: no characters Windows forbids, max 150, not a reserved device name.
+fn safe_stem(typed: &str, default_stem: &str) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !"<>:\"/\\|?*".contains(*c) && (*c as u32) >= 0x20).collect::<String>().trim().to_owned() };
+    let mut st: String = clean(typed).chars().take(150).collect();
+    st = st.trim_end_matches(['.', ' ']).to_owned();
+    if st.is_empty() {
+        st = clean(default_stem).trim_end_matches(['.', ' ']).to_owned();
+        if st.is_empty() {
+            st = "clip".into();
+        }
+    }
+    let first = st.split('.').next().unwrap_or("").to_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&first.as_str()) || ((first.starts_with("COM") || first.starts_with("LPT")) && first.len() == 4 && matches!(first.as_bytes()[3], b'1'..=b'9'));
+    if reserved {
+        st.push('_');
+    }
+    st
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::safe_stem;
+
+    #[test]
+    fn safe_names() {
+        assert_eq!(safe_stem("my: clip?.", "d"), "my clip");
+        assert_eq!(safe_stem("   ", "Apex 2024"), "Apex 2024");
+        assert_eq!(safe_stem("<>", "??"), "clip");
+        assert_eq!(safe_stem("con", "d"), "con_");
+        assert_eq!(safe_stem("COM3.part", "d"), "COM3.part_");
+        assert_eq!(safe_stem("COM0", "d"), "COM0");
+        assert_eq!(safe_stem(&"a".repeat(200), "d").len(), 150);
+    }
+}
+
+impl ShareDialog {
+    /// Opens and starts the "Original" encode right away, like Python.
+    pub fn new(ctx: &egui::Context, src: String, range: (f64, f64), ffmpeg: std::path::PathBuf, snap: crate::tracks::AudioSnap, thumb: Option<egui::TextureHandle>) -> ShareDialog {
+        let name = scanner::basename(&src);
+        let (stem, ext) = match name.rfind('.') {
+            Some(i) if i > 0 => (&name[..i], name[i..].to_lowercase()),
+            _ => (name, String::new()),
+        };
+        // shared clips are always mp4 (an .mkv source is remuxed)
+        let ext = if ext.is_empty() || ext == ".mkv" { ".mp4".to_owned() } else { ext };
+        let default_stem = if stem.is_empty() { "clip".to_owned() } else { stem.to_owned() };
+        let mut d = ShareDialog {
+            src,
+            t_start: range.0,
+            t_end: range.1,
+            ext,
+            ffmpeg,
+            snap,
+            thumb,
+            selected: 0,
+            name: default_stem.clone(),
+            default_stem,
+            ctl: crate::media::ShareCtl::default(),
+            named: false,
+            copy_msg: None,
+        };
+        d.start(ctx);
+        d
+    }
+
+    fn start(&mut self, ctx: &egui::Context) {
+        if self.ctl.state.lock().unwrap().encoding {
+            return;
+        }
+        self.named = false;
+        self.copy_msg = None;
+        let job = crate::media::ShareJob {
+            src: self.src.clone(),
+            t_start: self.t_start,
+            t_end: self.t_end,
+            mb_lim: SHARE_SIZES[self.selected].1,
+            ext: self.ext.clone(),
+            ffmpeg: self.ffmpeg.clone(),
+            snap: self.snap.clone(),
+        };
+        crate::media::start_share(job, self.ctl.clone(), ctx.clone());
+    }
+
+    /// Python `_apply_name`: rename the finished file to the typed name (it is alone in its
+    /// own temp folder, so the name can't clash). Returns the file's path.
+    fn apply_name(&mut self) -> Option<String> {
+        let mut st = self.ctl.state.lock().unwrap();
+        let cur = st.output.clone()?;
+        if st.encoding || !std::path::Path::new(&cur).exists() {
+            return Some(cur);
+        }
+        let dir = std::path::Path::new(&cur).parent()?.to_path_buf();
+        let new = dir.join(format!("{}{}", safe_stem(&self.name, &self.default_stem), self.ext)).to_string_lossy().into_owned();
+        if new != cur && std::fs::rename(&cur, &new).is_ok() {
+            st.output = Some(new.clone());
+            return Some(new);
+        }
+        Some(cur)
+    }
+
+    /// Kill the encode and delete the temp file (app exit).
+    pub fn close(&mut self) {
+        self.ctl.close();
+    }
+
+    /// Returns false once closed.
+    pub fn show(&mut self, ctx: &egui::Context) -> bool {
+        let (phase, status, progress, encoding, has_output) = {
+            let st = self.ctl.state.lock().unwrap();
+            (st.phase, st.status.clone(), st.progress, st.encoding, st.output.is_some())
+        };
+        if phase == crate::media::SharePhase::Ready && !self.named {
+            self.named = true;
+            self.apply_name();
+        }
+        let mut open = true;
+        let tw = 280.0;
+        let th = (tw * 9.0 / 16.0_f32).floor();
+        let resp = egui::Modal::new(egui::Id::new("share_dialog")).frame(dialog_frame()).show(ctx, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(28, 22)).show(ui, |ui| {
+                ui.set_width(tw);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("SHARE ON DISCORD").font(theme::font_title()).color(theme::text_primary()));
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("Choose a File Size").font(theme::font_ui()).color(theme::text_primary()));
+                    ui.add_space(6.0);
+                });
+                let bw: f32 = SHARE_SIZES.iter().map(|(l, _)| widgets::text_width(ui, l, &theme::font_ui()) + 24.0 + 6.0).sum::<f32>() - 6.0;
+                ui.horizontal(|ui| {
+                    ui.add_space(((tw - bw) / 2.0).max(0.0));
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+                    for (i, (label, _)) in SHARE_SIZES.iter().enumerate() {
+                        let sel = self.selected == i;
+                        let (fg, bg) = if sel { (theme::accent_fg(), theme::accent()) } else { (theme::text_primary(), c("#242444")) };
+                        let w = widgets::text_width(ui, label, &theme::font_ui()) + 24.0;
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), egui::Sense::click());
+                        ui.painter().rect_filled(r, 0.0, bg);
+                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *label, theme::font_ui(), fg);
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() {
+                            // Python `_select_size`: the choice changes, the encode only
+                            // restarts when none is running
+                            self.selected = i;
+                            self.start(ui.ctx());
+                        }
+                    }
+                });
+                ui.add_space(14.0);
+                // thumbnail card + progress line + status
+                egui::Frame::new().fill(c("#1A1A2E")).show(ui, |ui| {
+                    ui.set_width(tw);
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(tw, th), egui::Sense::hover());
+                    ui.painter().rect_filled(r, 0.0, c("#0F0F1A"));
+                    match &self.thumb {
+                        Some(t) => {
+                            ui.painter().image(t.id(), r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                        }
+                        None => {
+                            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "No preview", theme::font_pt(11.0), theme::text_dim());
+                        }
+                    }
+                    let (pr, _) = ui.allocate_exact_size(Vec2::new(tw, 3.0), egui::Sense::hover());
+                    ui.painter().rect_filled(pr, 0.0, c("#13131f"));
+                    if let Some(f) = progress {
+                        ui.painter().rect_filled(egui::Rect::from_min_size(pr.min, Vec2::new(tw * f.min(1.0), 3.0)), 0.0, theme::accent());
+                    }
+                    let col = match phase {
+                        crate::media::SharePhase::Ready => c("#FFFFFF"),
+                        crate::media::SharePhase::Error => c("#e05555"),
+                        crate::media::SharePhase::Encoding => theme::text_muted(),
+                    };
+                    let (sr, _) = ui.allocate_exact_size(Vec2::new(tw, 45.0), egui::Sense::hover());
+                    ui.painter().text(sr.center(), egui::Align2::CENTER_CENTER, &status, theme::font_tiny(), col);
+                });
+                ui.add_space(10.0);
+                // file name: editable while and after encoding; the type is fixed
+                let mut commit = false;
+                let mut focused = false;
+                let box_resp = egui::Frame::new().fill(c("#161628")).stroke(egui::Stroke::new(1.0_f32, c("#2A2A4A"))).inner_margin(egui::Margin { left: 10, right: 8, top: 7, bottom: 7 }).show(ui, |ui| {
+                    ui.set_width(tw - 18.0);
+                    ui.horizontal(|ui| {
+                        let ext_w = widgets::text_width(ui, &self.ext, &theme::font_ui()) + 8.0;
+                        let te = ui.add(egui::TextEdit::singleline(&mut self.name).font(theme::font_ui()).text_color(theme::text_primary()).frame(false).desired_width(tw - 18.0 - ext_w - 8.0));
+                        focused = te.has_focus();
+                        if te.lost_focus() {
+                            commit = true; // Enter or clicking away
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(&self.ext).font(theme::font_ui()).color(theme::text_dim()));
+                        });
+                    });
+                });
+                if focused {
+                    ui.painter().rect_stroke(box_resp.response.rect, 0.0, egui::Stroke::new(1.0_f32, theme::accent()), egui::StrokeKind::Inside);
+                }
+                if commit {
+                    self.name = safe_stem(&self.name, &self.default_stem);
+                    self.apply_name();
+                }
+                ui.add_space(10.0);
+                // copy (+ retry after a failure)
+                let err = phase == crate::media::SharePhase::Error;
+                let copy_text = match self.copy_msg {
+                    Some((t, until)) if std::time::Instant::now() < until => {
+                        ui.ctx().request_repaint_after(until - std::time::Instant::now());
+                        t
+                    }
+                    _ => "Copy to clipboard",
+                };
+                let retry_w = if err { widgets::text_width(ui, "\u{21ba}  Retry", &theme::font_ui()) + 28.0 + 6.0 } else { 0.0 };
+                ui.horizontal(|ui| {
+                    ui.add_space(((tw - 160.0 - retry_w) / 2.0).max(0.0));
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+                    let (r, resp) = ui.allocate_exact_size(Vec2::new(160.0, 30.0), egui::Sense::click());
+                    ui.painter().rect_filled(r, 7.0, if resp.hovered() { c("#2A2A4A") } else { c("#242444") });
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, copy_text, theme::font_ui(), theme::text_primary());
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        // Python `_do_copy`: the shared file once it exists, else the clip itself
+                        let path = if has_output { self.apply_name().unwrap_or_else(|| self.src.clone()) } else { self.src.clone() };
+                        let ok = crate::window::copy_file_to_clipboard(&path.replace('/', "\\"));
+                        self.copy_msg = Some((if ok { "\u{2713}  Copied!" } else { "\u{2717}  Failed" }, std::time::Instant::now() + std::time::Duration::from_secs(2)));
+                    }
+                    if err && plain_btn(ui, "\u{21ba}  Retry", theme::text_primary(), 14.0) {
+                        self.start(ui.ctx());
+                    }
+                });
+            });
+            let _ = encoding;
+            separator(ui);
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if plain_btn(ui, "Close", theme::text_primary(), 14.0) {
+                        open = false;
+                    }
+                });
+            });
+        });
+        if resp.should_close() {
+            open = false;
+        }
+        if !open {
+            self.ctl.close();
+        }
+        open
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Compress (Python `_open_compress_dialog`)
 // ---------------------------------------------------------------------------------------------
 

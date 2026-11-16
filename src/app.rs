@@ -9,7 +9,7 @@ use crate::scanner::{self, Msg, Scanner};
 use crate::sync::{self, Cloud, Phone, PhoneSnap};
 use crate::theme::{self, c};
 use crate::ui::clip_grid::{Badges, ClipGrid, GridAction};
-use crate::ui::dialogs::{CategorizeDialog, CompressAction, CompressDialog, Confirm, ConfirmDialog, RenameDialog};
+use crate::ui::dialogs::{CategorizeDialog, CompressAction, CompressDialog, Confirm, ConfirmDialog, RenameDialog, ShareDialog};
 use crate::ui::header::{Header, HeaderAction};
 use crate::ui::player_view::{ClipState, PlayerView, ViewAction, SPEEDS};
 use crate::ui::settings::{SettingsAction, SettingsPage, SettingsValues};
@@ -83,8 +83,32 @@ pub struct FeatherApp {
     cache_info: String,
     cache_count: usize,
     confirm_cache: Option<ConfirmDialog>,
+    share: Option<ShareDialog>,
+    fit: Fit,
     /// Thumbnails were cleared: reload them when Settings closes (Python `_thumbs_dirty`).
     thumbs_dirty: bool,
+}
+
+/// egui id of the clip sidebar (its width lives in egui's panel state).
+const CLIPS_PANEL: &str = "clips";
+/// Python `SIDEBAR_MAX_W` and the pane minimums (left 400, sidebar 220).
+const SIDEBAR_MAX_W: f32 = 440.0;
+const LEFT_MIN: f32 = 400.0;
+const RIGHT_MIN: f32 = 220.0;
+
+/// Python `_sync_sash_16_9` / `_fit_video_16_9` state.
+struct Fit {
+    start: Instant,
+    /// The remembered window size wins over the startup fit.
+    had_saved_size: bool,
+    startup_done: bool,
+    /// Window size the sidebar was last fitted for (Python `_sash_last_state`).
+    last_state: Option<egui::Vec2>,
+    /// A new window size and since when it has been stable (fitted once it settles, like
+    /// Python fits once the window edge is released).
+    pending: Option<(egui::Vec2, Instant)>,
+    /// Sidebar width to force for one frame.
+    sidebar_w: Option<f32>,
 }
 
 /// Results from background threads.
@@ -208,6 +232,15 @@ impl FeatherApp {
             cache_info: "Calculating\u{2026}".into(),
             cache_count: 0,
             confirm_cache: None,
+            share: None,
+            fit: Fit {
+                start: Instant::now(),
+                had_saved_size: st.get_bool("remember_window_size", true) && saved_window(&st).is_some(),
+                startup_done: false,
+                last_state: None,
+                pending: None,
+                sidebar_w: None,
+            },
             thumbs_dirty: false,
             win: Win {
                 hwnd,
@@ -881,6 +914,87 @@ impl FeatherApp {
         self.compress = Some((CompressDialog::new(targets, thumb), CompressCtl::new()));
     }
 
+    /// Python `_fit_video_16_9` (once, 0.5 s after start: window height so the video area is
+    /// 16:9, unless a remembered size was restored) and `_sync_sash_16_9` (after the window
+    /// size changes, not in the first 3 s: the clip sidebar gets whatever width makes the
+    /// video exactly 16:9, within its limits).
+    fn fit_16_9(&mut self, ctx: &egui::Context, video: egui::Rect, maximized: bool) {
+        if video.width() < 50.0 || video.height() < 50.0 {
+            return;
+        }
+        let now = Instant::now();
+        let ar = 16.0 / 9.0;
+        if !self.fit.startup_done {
+            if now - self.fit.start < Duration::from_millis(500) {
+                ctx.request_repaint_after(Duration::from_millis(500) - (now - self.fit.start));
+            } else {
+                self.fit.startup_done = true;
+                if !maximized && !self.fit.had_saved_size && !window::is_iconic(self.win.hwnd) {
+                    if let Some((x, y, w, h)) = window::window_rect(self.win.hwnd) {
+                        let ppp = ctx.pixels_per_point();
+                        let fixed_h = h as f32 - video.height() * ppp;
+                        let target_h = (video.width() * ppp / ar).round() as i32 + fixed_h.round() as i32;
+                        if (target_h - h).abs() > 1 {
+                            window::set_outer_rect(self.win.hwnd, x, y, w, target_h);
+                        }
+                    }
+                }
+            }
+        }
+        let state = ctx.content_rect().size();
+        if self.fit.last_state == Some(state) {
+            self.fit.pending = None;
+            return;
+        }
+        if now - self.fit.start < Duration::from_secs(3) {
+            self.fit.last_state = Some(state); // startup: leave the layout as it is
+            return;
+        }
+        match self.fit.pending {
+            Some((s, since)) if s == state => {
+                if now - since < Duration::from_millis(150) {
+                    ctx.request_repaint_after(Duration::from_millis(150) - (now - since));
+                    return;
+                }
+            }
+            _ => {
+                self.fit.pending = Some((state, now));
+                ctx.request_repaint_after(Duration::from_millis(150));
+                return;
+            }
+        }
+        self.fit.pending = None;
+        self.fit.last_state = Some(state);
+        let pane_w = state.x;
+        let mut want = (video.height() * ar).round();
+        want = want.max(pane_w - SIDEBAR_MAX_W);
+        want = want.min(pane_w - RIGHT_MIN).max(LEFT_MIN);
+        let sidebar = pane_w - want;
+        let cur = egui::containers::panel::PanelState::load(ctx, egui::Id::new(CLIPS_PANEL)).map(|s| s.rect.width()).unwrap_or(300.0);
+        if (cur - sidebar).abs() > 1.0 {
+            self.fit.sidebar_w = Some(sidebar.clamp(RIGHT_MIN, SIDEBAR_MAX_W));
+            ctx.request_repaint();
+        }
+    }
+
+    /// Python `_open_share_dialog`: the open clip, cut to the trim slider's range, playback
+    /// paused while the dialog is open.
+    fn open_share(&mut self, ctx: &egui::Context) {
+        let Some(src) = self.lib.current.clone() else { return };
+        // no ffmpeg: the dialog opens and says "Encoding failed", like Python
+        let ff = scanner::find_ffmpeg().unwrap_or_else(|| PathBuf::from("ffmpeg"));
+        let Ok(p) = &mut self.player else { return };
+        if p.playing() {
+            p.pause();
+        }
+        let dur = p.dur;
+        let (s, e) = (self.pb.bar.trim_start, self.pb.bar.trim_end);
+        let range = if dur > 0.0 { (s / 10000.0 * dur, e / 10000.0 * dur) } else { (0.0, dur) };
+        let snap = self.tracks.export_snapshot(&src);
+        let thumb = self.grid.thumbs.get(&src).cloned();
+        self.share = Some(ShareDialog::new(ctx, src, range, ff, snap, thumb));
+    }
+
     fn header_action(&mut self, ctx: &egui::Context, a: HeaderAction) {
         let pick = || rfd::FileDialog::new().set_title("Select your video folder").pick_folder().map(tk_dir);
         match a {
@@ -933,6 +1047,7 @@ impl FeatherApp {
                 }
             }
             HeaderAction::Compress => self.open_compress(),
+            HeaderAction::Share => self.open_share(ctx),
             HeaderAction::ApplyTrim => self.ask_apply_trim(),
             HeaderAction::Delete => self.ask_delete(),
             HeaderAction::Settings => {
@@ -1296,6 +1411,11 @@ impl FeatherApp {
                 }
             }
         }
+        if let Some(d) = &mut self.share {
+            if !d.show(ctx) {
+                self.share = None;
+            }
+        }
         if let Some(d) = &self.confirm_cache {
             if let Some(choice) = d.show(ctx) {
                 self.confirm_cache = None;
@@ -1445,36 +1565,45 @@ impl eframe::App for FeatherApp {
             self.nav_clip(step);
         }
 
-        // right: clip list (declared first so the header only spans the left side)
-        let badges = Badges { audio: &self.tracks.badges };
+        // Python `_enter_fullscreen`: everything except the video leaves the layout
         let mut grid_acts = Vec::new();
-        egui::SidePanel::right("clips")
-            .resizable(true)
-            .default_width(300.0)
-            .width_range(220.0..=440.0)
-            .frame(egui::Frame::new().fill(theme::sidebar_bg()).stroke(egui::Stroke::new(1.0_f32, theme::c("#242444"))))
-            .show_separator_line(false)
-            .show(ctx, |ui| grid_acts = self.grid.show(ui, &mut self.lib, &self.prefs, &badges));
-
         let mut header_acts = Vec::new();
-        let trim_mode = self.pb.trim_mode && self.lib.current.is_some();
-        egui::TopBottomPanel::top("header")
-            .frame(egui::Frame::new().fill(theme::bg()).inner_margin(egui::Margin::symmetric(16, 10)))
-            .show_separator_line(false)
-            .show(ctx, |ui| header_acts = self.header.show(ui, &self.lib, &self.prefs, trim_mode));
+        let mut view_acts = Vec::new();
+        if !fullscreen {
+            // right: clip list (declared first so the header only spans the left side)
+            let badges = Badges { audio: &self.tracks.badges };
+            let mut panel = egui::SidePanel::right(CLIPS_PANEL).resizable(true).default_width(300.0).width_range(220.0..=440.0);
+            if let Some(w) = self.fit.sidebar_w.take() {
+                panel = panel.exact_width(w); // 16:9 fit: this frame only, then resizable again
+            }
+            panel
+                .frame(egui::Frame::new().fill(theme::sidebar_bg()).stroke(egui::Stroke::new(1.0_f32, theme::c("#242444"))))
+                .show_separator_line(false)
+                .show(ctx, |ui| grid_acts = self.grid.show(ui, &mut self.lib, &self.prefs, &badges));
 
-        let clip = match &self.lib.current {
-            Some(path) => ClipState {
-                open: true,
-                starred: self.prefs.starred.contains(path),
-                liked: self.prefs.liked.contains(path),
-                trimmed: self.prefs.trim_enabled.contains(path),
-            },
-            None => ClipState::default(),
-        };
+            let trim_mode = self.pb.trim_mode && self.lib.current.is_some();
+            egui::TopBottomPanel::top("header")
+                .frame(egui::Frame::new().fill(theme::bg()).inner_margin(egui::Margin::symmetric(16, 10)))
+                .show_separator_line(false)
+                .show(ctx, |ui| header_acts = self.header.show(ui, &self.lib, &self.prefs, trim_mode));
+
+            let clip = match &self.lib.current {
+                Some(path) => ClipState {
+                    open: true,
+                    starred: self.prefs.starred.contains(path),
+                    liked: self.prefs.liked.contains(path),
+                    trimmed: self.prefs.trim_enabled.contains(path),
+                },
+                None => ClipState::default(),
+            };
+            let p = self.player.as_mut().unwrap();
+            view_acts = self.view.controls(ctx, p, &mut self.pb, &clip, &self.tracks);
+        }
         let p = self.player.as_mut().unwrap();
-        let view_acts = self.view.controls(ctx, p, &mut self.pb, &clip, &self.tracks);
-        self.view.video(ctx, p, &mut self.pb);
+        let video = self.view.video(ctx, p, &mut self.pb);
+        if !fullscreen {
+            self.fit_16_9(ctx, video, maximized);
+        }
 
         for a in view_acts {
             self.view_action(a);
@@ -1525,6 +1654,9 @@ impl eframe::App for FeatherApp {
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
         if let Some((_, ctl)) = &self.compress {
             ctl.cancel();
+        }
+        if let Some(d) = &mut self.share {
+            d.close();
         }
         if let Ok(p) = &self.player {
             // Python saves prefs in on_close too

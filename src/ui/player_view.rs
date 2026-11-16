@@ -54,6 +54,9 @@ pub struct PlayerView {
     flash: Option<(String, Color32, Instant)>,
     muted: bool,
     pre_mute_vol: Option<f64>,
+    /// Python click watcher state (`st["last"]`, `st["click_t"]`).
+    last_click: Option<Instant>,
+    click_t: Option<Instant>,
 }
 
 fn toggle_fullscreen(ctx: &egui::Context) {
@@ -130,6 +133,10 @@ impl PlayerView {
         }
         if key(egui::Key::F) {
             toggle_fullscreen(ctx);
+        }
+        // Python `_fullscreen_escape`
+        if is_fullscreen(ctx) && key(egui::Key::Escape) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         nav
     }
@@ -456,10 +463,22 @@ impl PlayerView {
             let resp = ui.allocate_rect(rect, Sense::click());
             if p.loaded {
                 ui.painter().add(p.video_callback(rect));
-                if resp.double_clicked() {
-                    toggle_fullscreen(ctx);
-                } else if resp.clicked() {
-                    pb.toggle_play(p);
+                // Python's click watcher: a press on the video toggles play (a second one
+                // within 0.2 s is ignored); in fullscreen a double click (< 0.45 s) leaves
+                // fullscreen and undoes the first click's play/pause
+                if resp.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+                    let now = Instant::now();
+                    let since = |t: Option<Instant>| t.map_or(f64::INFINITY, |t| (now - t).as_secs_f64());
+                    if is_fullscreen(ctx) && since(self.click_t) < 0.45 {
+                        self.click_t = None;
+                        self.last_click = Some(now);
+                        pb.toggle_play(p);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    } else if since(self.last_click) > 0.2 {
+                        self.last_click = Some(now);
+                        self.click_t = Some(now);
+                        pb.toggle_play(p);
+                    }
                 }
             } else {
                 no_video(ui, rect, if p.path.is_some() { "Loading\u{2026}" } else { "Select a clip to play" });
