@@ -8,3 +8,4 @@ pub mod player_view;
 pub mod settings;
 pub mod trim_slider;
 pub mod widgets;
+pub mod titlebar;

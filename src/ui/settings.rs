@@ -1,6 +1,6 @@
-//! Settings page (Python `_build_settings_page`): replaces the main window while open.
+﻿//! Settings page (Python `_build_settings_page`): replaces the main window while open.
 //! Ported so far: Starred clips, Cloud sync, Phone sync, Playback, Trimming, Clips (Recycle
-//! Bin). Appearance, Audio, auto-refresh, Load more, thumbnail cache, Window and the shortcut
+//! Bin), Window. Appearance, Audio, auto-refresh, Load more, thumbnail cache and the shortcut
 //! cards come with their features.
 
 use super::widgets::{self, ellipsize, Ghost, Row};
@@ -26,6 +26,9 @@ pub enum SettingsAction {
     StartAlways(bool),
     TrimGpu(bool),
     RecycleBin(bool),
+    RememberSize(bool),
+    CloseToTray(bool),
+    StartWithWindows(bool),
 }
 
 /// Values the page shows (the rest is read from `Cloud` / `Phone`).
@@ -36,6 +39,9 @@ pub struct SettingsValues<'a> {
     pub start_always: bool,
     pub trim_gpu: bool,
     pub recycle_bin: bool,
+    pub remember_size: bool,
+    pub close_to_tray: bool,
+    pub start_with_windows: bool,
 }
 
 #[derive(Default)]
@@ -317,6 +323,26 @@ impl SettingsPage {
                             row(ui, "Move deleted clips to the Recycle Bin", "Turn off to delete clips permanently instead", |ui| {
                                 if toggle(ui, v.recycle_bin) {
                                     acts.push(SettingsAction::RecycleBin(!v.recycle_bin));
+                                }
+                            });
+                        });
+
+                        section(ui, "WINDOW", |ui| {
+                            row(ui, "Remember window size", "Open the app at the size you last used", |ui| {
+                                if toggle(ui, v.remember_size) {
+                                    acts.push(SettingsAction::RememberSize(!v.remember_size));
+                                }
+                            });
+                            divider(ui);
+                            row(ui, "Close button hides to the tray", "Turn off to quit the app when you close the window", |ui| {
+                                if toggle(ui, v.close_to_tray) {
+                                    acts.push(SettingsAction::CloseToTray(!v.close_to_tray));
+                                }
+                            });
+                            divider(ui);
+                            row(ui, "Start with Windows", "Launch Feather Player in the tray when you sign in", |ui| {
+                                if toggle(ui, v.start_with_windows) {
+                                    acts.push(SettingsAction::StartWithWindows(!v.start_with_windows));
                                 }
                             });
                         });

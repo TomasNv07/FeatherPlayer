@@ -1,4 +1,4 @@
-//! App shell: owns the player, prefs, clip library, scanner and the views.
+﻿//! App shell: owns the player, prefs, clip library, scanner and the views.
 
 use crate::library::{self, Library};
 use crate::media::{self, CompressCtl, MediaMsg, TrimJob};
@@ -13,6 +13,9 @@ use crate::ui::dialogs::{CategorizeDialog, CompressAction, CompressDialog, Confi
 use crate::ui::header::{Header, HeaderAction};
 use crate::ui::player_view::{ClipState, PlayerView, ViewAction, SPEEDS};
 use crate::ui::settings::{SettingsAction, SettingsPage, SettingsValues};
+use crate::tray::{Tray, TrayMsg};
+use crate::ui::titlebar::{self, TitleAction, TitleBar};
+use crate::window;
 use eframe::{egui, glow};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -67,6 +70,39 @@ pub struct FeatherApp {
     confirm_delete: Option<(ConfirmDialog, Vec<String>, HashMap<String, Option<String>>)>,
     confirm_cloud_delete: Option<ConfirmDialog>,
     error_dialog: Option<ConfirmDialog>,
+    win: Win,
+}
+
+/// Main-window state (step 8): title bar, tray, close/quit, remembered size.
+struct Win {
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    titlebar: TitleBar,
+    tray: Tray,
+    restore_rx: Receiver<()>,
+    /// Hidden in the tray (Python `_hidden_to_tray`).
+    hidden: bool,
+    /// Quitting for real: let the close through.
+    quitting: bool,
+    close_to_tray: bool,
+    remember_size: bool,
+    startup_on: bool,
+    /// settings `window`: (w, h, max).
+    saved: Option<(i64, i64, bool)>,
+    /// The saved size is applied on the first frame; until then (and 800 ms after) nothing is
+    /// written, so the saved size isn't overwritten before it was restored.
+    restore_pending: bool,
+    size_ready_at: Option<Instant>,
+    last_rect: Option<(i32, i32, i32, i32)>,
+    size_save_due: Option<Instant>,
+    /// eframe shows the window after its first frame whatever the builder said: a --minimized`r
+    /// start hides it again for a few frames.
+    rehide_frames: u8,
+}
+
+impl Win {
+    fn size_ready(&self) -> bool {
+        self.size_ready_at.is_some_and(|t| Instant::now() >= t)
+    }
 }
 
 /// Folder from a dialog, written like Tk's askdirectory ("Z:/All clips/Clips"), since folder
@@ -76,8 +112,12 @@ fn tk_dir(p: PathBuf) -> String {
 }
 
 impl FeatherApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, lib: Option<PathBuf>, file: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, lib: Option<PathBuf>, file: Option<String>, minimized: bool) -> Self {
         theme::apply(&cc.egui_ctx);
+        let hwnd = window::hwnd_of(cc);
+        window::apply_dark_frame(hwnd, theme::bg());
+        let (restore_tx, restore_rx) = std::sync::mpsc::channel();
+        window::start_restore_listener(restore_tx, cc.egui_ctx.clone());
         let prefs = Prefs::load();
         let st = prefs::read_settings();
         let step = st.get_i64("see_more_step", 50);
@@ -129,9 +169,181 @@ impl FeatherApp {
             confirm_cloud_delete: None,
             error_dialog: None,
             prefs,
+            win: Win {
+                hwnd,
+                titlebar: TitleBar::default(),
+                tray: Tray::new(cc.egui_ctx.clone()),
+                restore_rx,
+                hidden: false,
+                quitting: false,
+                close_to_tray: st.get_bool("close_to_tray", false),
+                remember_size: st.get_bool("remember_window_size", true),
+                startup_on: window::startup_enabled(),
+                saved: saved_window(&st),
+                restore_pending: true,
+                size_ready_at: None,
+                last_rect: None,
+                size_save_due: None,
+                rehide_frames: 0,
+            },
         };
         app.load_folders(false);
+        if minimized {
+            // Python `_start_hidden` (Start with Windows): straight to the tray
+            app.win.hidden = true;
+            app.win.rehide_frames = 3;
+            if !app.win.tray.show() {
+                app.win.hidden = false;
+                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+        }
         app
+    }
+
+    /// Python `_restore_saved_size` (first frame): saved size clamped to the work area, kept
+    /// on screen, then maximised if it was.
+    fn restore_saved_size(&mut self, ctx: &egui::Context) {
+        self.win.restore_pending = false;
+        let ready = Instant::now() + Duration::from_millis(800);
+        let Some((w, h, max)) = self.win.saved.filter(|_| self.win.remember_size) else {
+            self.win.size_ready_at = Some(Instant::now());
+            return;
+        };
+        let hwnd = self.win.hwnd;
+        if let (Some((wx, wy, ww, wh)), Some((x, y, _, _))) = (window::work_area(hwnd), window::window_rect(hwnd)) {
+            let w = (w as i32).min(ww).max(600);
+            let h = (h as i32).min(wh).max(400);
+            let x = x.max(wx).min(wx + ww - w);
+            let y = y.max(wy).min(wy + wh - h);
+            window::set_outer_rect(hwnd, x, y, w, h);
+            if max {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+        }
+        self.win.size_ready_at = Some(ready);
+    }
+
+    /// Python `_save_window_size`: the outer size (the normal size when maximised) + max flag.
+    fn save_window_size(&mut self, ctx: &egui::Context) {
+        self.win.size_save_due = None;
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let hwnd = self.win.hwnd;
+        if !(self.win.remember_size && self.win.size_ready()) || fullscreen || self.win.hidden || window::is_iconic(hwnd) {
+            return;
+        }
+        let data = if window::is_zoomed(hwnd) {
+            window::normal_size(hwnd).map(|(w, h)| (w as i64, h as i64, true))
+        } else {
+            window::window_rect(hwnd).map(|(_, _, w, h)| (w as i64, h as i64, false))
+        };
+        if let Some(d @ (w, h, max)) = data {
+            if w > 0 && h > 0 && Some(d) != self.win.saved {
+                self.win.saved = Some(d);
+                prefs::save_setting("window", serde_json::json!({"w": w, "h": h, "max": max}));
+            }
+        }
+    }
+
+    /// Python `on_close` (the X button / Alt+F4): hide to the tray, or quit if that is off.
+    fn on_close(&mut self, ctx: &egui::Context) {
+        self.save_window_size(ctx);
+        if !self.win.close_to_tray {
+            self.real_quit(ctx);
+            return;
+        }
+        self.hide_to_tray(ctx);
+    }
+
+    /// Python `_real_quit` (also Ctrl+Q and the tray's Quit). Prefs are saved in `on_exit`.
+    fn real_quit(&mut self, ctx: &egui::Context) {
+        self.save_window_size(ctx);
+        self.win.quitting = true;
+        self.win.tray.hide();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Python `on_close` with close-to-tray + `_restore_window`'s reset: the clip is closed,
+    /// the window hidden and the tray icon shown.
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        if let Ok(p) = &mut self.player {
+            self.prefs.volume = p.volume.round() as i64;
+            p.stop();
+        }
+        self.prefs.save();
+        self.lib.current = None;
+        self.view.now_playing.clear();
+        self.view.now_playing_mb.clear();
+        self.pb.set_trim_mode(false, None);
+        if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        if !self.win.tray.show() {
+            // Python: no tray icon possible -> quit
+            self.real_quit(ctx);
+            return;
+        }
+        self.win.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// Python `_restore_window` / the restore signal from a second launch.
+    fn show_window(&mut self, ctx: &egui::Context) {
+        if self.win.hidden {
+            self.win.hidden = false;
+            self.win.rehide_frames = 0;
+            self.win.tray.hide();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            window::apply_dark_frame(self.win.hwnd, theme::bg());
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Tray / restore messages, close requests, Ctrl+Q and the size watch. Every frame.
+    fn window_tick(&mut self, ctx: &egui::Context) {
+        while let Ok(m) = self.win.tray.rx.try_recv() {
+            match m {
+                TrayMsg::Open => self.show_window(ctx),
+                TrayMsg::Quit => self.real_quit(ctx),
+            }
+        }
+        while self.win.restore_rx.try_recv().is_ok() {
+            self.show_window(ctx);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.win.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.on_close(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
+            self.real_quit(ctx);
+        }
+        if self.win.hidden {
+            return;
+        }
+        if self.win.restore_pending {
+            self.restore_saved_size(ctx);
+        }
+        // Python `_queue_size_save`: 500 ms after the window stops changing
+        if self.win.remember_size && self.win.size_ready() {
+            let r = window::window_rect(self.win.hwnd);
+            if r != self.win.last_rect {
+                self.win.last_rect = r;
+                self.win.size_save_due = Some(Instant::now() + Duration::from_millis(500));
+            }
+        }
+        if let Some(due) = self.win.size_save_due {
+            let now = Instant::now();
+            if now >= due {
+                self.save_window_size(ctx);
+            } else {
+                ctx.request_repaint_after(due - now);
+            }
+        }
+        if let Some(t) = self.win.size_ready_at {
+            if Instant::now() < t {
+                ctx.request_repaint_after(t - Instant::now());
+            }
+        }
     }
 
     /// Python `_load_folders(self._checked_folders, auto)`: active folder first, scan in the
@@ -561,6 +773,7 @@ impl FeatherApp {
                     }
                 }
                 self.settings_open = true;
+                self.win.startup_on = window::startup_enabled();
             }
         }
         let _ = ctx;
@@ -779,6 +992,25 @@ impl FeatherApp {
                 self.recycle_bin = on;
                 prefs::save_setting("recycle_bin", Value::Bool(on));
             }
+            SettingsAction::RememberSize(on) => {
+                // Python `_on_remember_size_toggle`
+                self.win.remember_size = on;
+                prefs::save_setting("remember_window_size", Value::Bool(on));
+                if on {
+                    self.win.size_ready_at = Some(Instant::now());
+                    self.save_window_size(ctx);
+                }
+            }
+            SettingsAction::CloseToTray(on) => {
+                self.win.close_to_tray = on;
+                prefs::save_setting("close_to_tray", Value::Bool(on));
+            }
+            SettingsAction::StartWithWindows(on) => {
+                // Python `_on_startup_toggle`: if the registry can't be written the switch
+                // shows the real state again
+                window::set_startup(on);
+                self.win.startup_on = window::startup_enabled();
+            }
         }
     }
 
@@ -879,6 +1111,13 @@ fn error_dialog(head: &str, errors: Vec<String>) -> ConfirmDialog {
     }
 }
 
+/// settings `window` = {"w", "h", "max"}; only used when w and h are set (Python `_saved_win`).
+fn saved_window(st: &serde_json::Map<String, Value>) -> Option<(i64, i64, bool)> {
+    let w = st.get("window")?.as_object()?;
+    let num = |k: &str| w.get(k).and_then(|v| v.as_f64()).map(|f| f as i64).filter(|n| *n != 0);
+    Some((num("w")?, num("h")?, w.get("max").and_then(|v| v.as_bool()).unwrap_or(false)))
+}
+
 /// Python `f"..."[:60]`.
 fn cut60(s: &str) -> String {
     s.chars().take(60).collect()
@@ -886,7 +1125,35 @@ fn cut60(s: &str) -> String {
 
 impl eframe::App for FeatherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.window_tick(ctx);
         self.handle_messages(ctx);
+        if self.win.hidden {
+            if self.win.rehide_frames > 0 {
+                self.win.rehide_frames -= 1;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                ctx.request_repaint();
+            }
+            // in the tray: no UI, but cloud sync keeps running (Python `_cloud_tick`)
+            if let Ok(p) = &mut self.player {
+                p.poll();
+            }
+            self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
+            ctx.request_repaint_after(Duration::from_secs(5));
+            return;
+        }
+        // title bar first so it spans the whole width; gone in fullscreen
+        let (fullscreen, maximized) = ctx.input(|i| (i.viewport().fullscreen.unwrap_or(false), i.viewport().maximized.unwrap_or(false)));
+        if !fullscreen {
+            match self.win.titlebar.show(ctx, maximized) {
+                Some(TitleAction::Minimize) => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                Some(TitleAction::ToggleMaximize) => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                Some(TitleAction::Close) => self.on_close(ctx),
+                None => {}
+            }
+            if !maximized {
+                titlebar::resize_edges(ctx);
+            }
+        }
         let p = match &mut self.player {
             Ok(p) => p,
             Err(e) => {
@@ -916,6 +1183,9 @@ impl eframe::App for FeatherApp {
                 start_always: self.start_always,
                 trim_gpu: self.trim_gpu,
                 recycle_bin: self.recycle_bin,
+                remember_size: self.win.remember_size,
+                close_to_tray: self.win.close_to_tray,
+                start_with_windows: self.win.startup_on,
             };
             let acts = self.settings.show(ctx, &v, &self.cloud, &mut self.phone, &self.lib);
             for a in acts {
