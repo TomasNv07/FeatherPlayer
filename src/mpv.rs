@@ -110,8 +110,12 @@ pub struct Core {
 unsafe impl Send for Core {}
 unsafe impl Sync for Core {}
 
+/// TEMP debug: how often mpv's update callback fired.
+pub static UPDATE_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
     // Called by mpv from an arbitrary thread when a new video frame is ready.
+    UPDATE_CALLS.fetch_add(1, Ordering::Relaxed);
     if !ctx.is_null() {
         let c = &*(ctx as *const eframe::egui::Context);
         c.request_repaint();

@@ -1680,6 +1680,28 @@ impl eframe::App for FeatherApp {
                 }
             }
         }
+        // TEMP: FP_DEBUG_FRAMES=1 logs frames per second and what asked for them
+        if std::env::var_os("FP_DEBUG_FRAMES").is_some() {
+            let id = egui::Id::new("dbg_frames");
+            let (mut n, mut t0, mut evs): (u32, Option<Instant>, String) = ctx.data(|d| d.get_temp(id)).unwrap_or((0, None, String::new()));
+            n += 1;
+            let kinds: Vec<String> = ctx.input(|i| i.raw.events.iter().map(|e| format!("{e:?}").chars().take(40).collect()).collect());
+            let causes: Vec<String> = ctx.repaint_causes().iter().map(|c| c.to_string().trim().to_owned()).collect();
+            evs.push_str(&format!("[{}|{}]", if kinds.is_empty() { "-".to_owned() } else { kinds.join(",") }, causes.join(" ")));
+            let start = *t0.get_or_insert_with(Instant::now);
+            if start.elapsed() >= Duration::from_secs(1) {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("target/frames_debug.txt") {
+                    let causes: Vec<String> = ctx.repaint_causes().iter().map(|c| c.to_string()).collect();
+                    let mpv_cb = crate::mpv::UPDATE_CALLS.swap(0, std::sync::atomic::Ordering::Relaxed);
+                    let _ = writeln!(f, "{n} frames/s hidden={} mpv_update_cb={mpv_cb} causes={causes:?} events={evs}", self.win.hidden);
+                }
+                n = 0;
+                t0 = Some(Instant::now());
+                evs.clear();
+            }
+            ctx.data_mut(|d| d.insert_temp(id, (n, t0, evs)));
+        }
         self.window_tick(ctx);
         self.handle_messages(ctx);
         if self.win.hidden {

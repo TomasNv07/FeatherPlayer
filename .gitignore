@@ -1,4 +1,6 @@
 /target/
+/dist/
+/installers/
 Cargo.lock.bak
 *.dll
 *.exe
