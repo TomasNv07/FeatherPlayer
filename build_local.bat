@@ -2,7 +2,7 @@
 rem Builds Feather Player (Rust) and puts everything it needs into dist\FeatherPlayer\:
 rem   FeatherPlayer.exe, libmpv-2.dll, pics\, ffmpeg\ (ffmpeg.exe + ffprobe.exe)
 rem libmpv-2.dll and ffmpeg are copied from %USERPROFILE%\FeatherPlayer (only read, never changed).
-rem pics come from the repo's pics\ folder, else from %USERPROFILE%\FeatherPlayer\pics.
+rem pics come from the repo's pics\ folder.
 rem Usage: build_local.bat [nopause]
 setlocal
 cd /d "%~dp0"
@@ -26,14 +26,13 @@ if not exist "%DATA%\libmpv-2.dll" (
 )
 copy /y "%DATA%\libmpv-2.dll" "%DIST%\" >nul || goto :fail
 
-if exist "pics\feather1.ico" (
-    xcopy /e /i /y /q "pics" "%DIST%\pics" >nul || goto :fail
-) else if exist "%DATA%\pics\feather1.ico" (
-    xcopy /e /i /y /q "%DATA%\pics" "%DIST%\pics" >nul || goto :fail
-) else (
-    echo ERROR: no pics folder with feather1.ico found ^(repo pics\ or %DATA%\pics^).
+rem pics\ is in the repo (feather_app.ico = installer + exe icon, made by setup\make_icon.ps1)
+if not exist "pics\feather_app.ico" (
+    echo ERROR: pics\feather_app.ico not found - git pull, or run setup\make_icon.ps1.
     goto :fail
 )
+if not exist "pics\feather.png" echo WARNING: pics\feather.png missing - no logo in the title bar.
+xcopy /e /i /y /q "pics" "%DIST%\pics" >nul || goto :fail
 
 if exist "%DATA%\ffmpeg\ffmpeg.exe" (
     mkdir "%DIST%\ffmpeg"

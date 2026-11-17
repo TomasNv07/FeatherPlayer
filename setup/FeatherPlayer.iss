@@ -11,10 +11,12 @@
 ; and "Start with Windows" keep working, and removes the Python build's leftovers.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.5"
+  #define MyAppVersion "1.0.7"
 #endif
 #define MyAppName "Feather Player"
 #define MyAppExe  "FeatherPlayer.exe"
+; must equal window::set_app_id (the taskbar matches the running app to its shortcut by this)
+#define MyAppUserModelID "FeatherPlayer.App"
 ; repo root = the folder above this file
 #define Root      AddBackslash(SourcePath) + ".."
 #define DistDir   Root + "\dist\FeatherPlayer"
@@ -38,9 +40,9 @@ OutputBaseFilename=FeatherPlayer_Setup_{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile={#DistDir}\pics\feather1.ico
-; the exe has no icon of its own (the window icon is set at runtime), so use the .ico
-UninstallDisplayIcon={app}\pics\feather1.ico
+; pics\feather_app.ico (16..256 px) is also built into the exe by build.rs
+SetupIconFile={#DistDir}\pics\feather_app.ico
+UninstallDisplayIcon={app}\{#MyAppExe}
 ; Closes a running copy (and restarts it) when updating
 CloseApplications=yes
 
@@ -60,8 +62,9 @@ Type: files; Name: "{autodesktop}\FeatherLauncher.lnk"
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\pics\feather1.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\pics\feather1.ico"; Tasks: desktopicon
+; icon from the exe itself; AppUserModelID so the taskbar button and pins use this shortcut
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; AppUserModelID: "{#MyAppUserModelID}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; AppUserModelID: "{#MyAppUserModelID}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
