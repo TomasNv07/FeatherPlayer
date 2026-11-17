@@ -412,7 +412,7 @@ impl FeatherApp {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         if let Ok(p) = &mut self.player {
             self.prefs.volume = p.volume.round() as i64;
-            p.stop();
+            p.close();
         }
         self.release_preload(None);
         self.prefs.save();
@@ -1354,7 +1354,7 @@ impl FeatherApp {
         // mpv keeps the open clip locked: let go of it before deleting
         if let (Ok(p), Some(cur)) = (&mut self.player, &self.lib.current) {
             if names.contains(cur) {
-                p.stop();
+                p.close();
                 std::thread::sleep(Duration::from_millis(400));
             }
         }

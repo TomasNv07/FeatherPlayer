@@ -359,6 +359,15 @@ impl Player {
         self.loaded = false;
     }
 
+    /// Close the clip for good (hidden to the tray, clip deleted): like `stop`, and forget the
+    /// file, so the video area says "Select a clip to play" instead of "Loading…".
+    pub fn close(&mut self) {
+        self.stop();
+        self.path = None;
+        self.autoplay = None;
+        self.pending_start = None;
+    }
+
     pub fn set_volume(&mut self, v: f64) {
         self.volume = v.clamp(0.0, 100.0);
         let _ = self.core.set("volume", &format!("{}", self.volume));
