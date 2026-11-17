@@ -431,7 +431,7 @@ impl FeatherApp {
             return;
         }
         self.win.hidden = true;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        window::hide_to_tray(self.win.hwnd);
     }
 
     /// Python `_restore_window` / the restore signal from a second launch.
@@ -440,8 +440,10 @@ impl FeatherApp {
             self.win.hidden = false;
             self.win.rehide_frames = 0;
             self.win.tray.hide();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            window::restore_from_tray(self.win.hwnd);
             window::apply_dark_frame(self.win.hwnd, theme::bg());
+            ctx.request_repaint();
+            return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1706,9 +1708,16 @@ impl eframe::App for FeatherApp {
         self.handle_messages(ctx);
         if self.win.hidden {
             if self.win.rehide_frames > 0 {
+                // eframe shows the window after frame 1 (and winit re-applies its own styles
+                // then), so `--minimized` hides it again for a few frames
                 self.win.rehide_frames -= 1;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                window::hide_to_tray(self.win.hwnd);
                 ctx.request_repaint();
+            } else if !window::is_iconic(self.win.hwnd) {
+                // restored from outside (a second launch's ShowWindow nudge without the
+                // restore port): leave the tray properly
+                self.show_window(ctx);
+                return;
             }
             // in the tray: no UI, but cloud sync keeps running (Python `_cloud_tick`)
             if let Ok(p) = &mut self.player {

@@ -4,7 +4,7 @@
 
 use eframe::egui;
 use std::sync::mpsc::Sender;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::System::Registry::{
@@ -12,8 +12,9 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowPlacement, GetWindowRect, IsIconic, IsZoomed, SetForegroundWindow, SetWindowPos, ShowWindow,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT,
+    FindWindowW, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, IsZoomed, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+    SW_RESTORE, SW_SHOWMINNOACTIVE, WINDOWPLACEMENT, WPF_SETMINPOSITION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const SINGLE_INSTANCE_MUTEX: &str = "ClipsVideoPlayerApp_SingleInstance_Mutex";
@@ -91,6 +92,53 @@ pub fn work_area(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         }
         let r = mi.rcWork;
         Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+}
+
+fn set_ex_style(hwnd: HWND, add: u32, remove: u32) {
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ((ex | add) & !remove) as isize);
+    }
+}
+
+/// "Hidden" in the tray = a minimized tool window (no taskbar button, no Alt+Tab entry).
+/// Not SW_HIDE on its own: a hidden window never gets WM_PAINT, so eframe's redraw request is
+/// never answered, its loop spins a whole core and `update` stops running (cloud sync stalls).
+/// A minimized window keeps `update` running at ~0 CPU.
+pub fn hide_to_tray(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE); // the taskbar only notices the style change while hidden
+        set_ex_style(hwnd, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW);
+        // a minimized tool window is parked at the bottom-left of the screen (a small caption
+        // stub, visible with an auto-hide taskbar), so minimize it off-screen instead
+        let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+        wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd, &mut wp) != 0 {
+            wp.flags |= WPF_SETMINPOSITION;
+            wp.ptMinPosition = POINT { x: -32000, y: -32000 };
+            wp.showCmd = SW_SHOWMINNOACTIVE as _;
+            SetWindowPlacement(hwnd, &wp);
+        } else {
+            ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+        }
+    }
+}
+
+/// Undoes `hide_to_tray`: taskbar button back, window restored (maximised again if it was)
+/// and brought to the front.
+pub fn restore_from_tray(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE);
+        set_ex_style(hwnd, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
     }
 }
 
