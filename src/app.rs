@@ -777,17 +777,22 @@ impl FeatherApp {
                     d.done.insert(src, ok);
                 }
             }
-            MediaMsg::CompressDone(done, failed, cancelled) => {
+            MediaMsg::CompressDone(done, skipped, failed, cancelled) => {
                 if let Some((d, _)) = &mut self.compress {
                     d.encoding = false;
+                    let mb = d.selected.map(|i| crate::ui::dialogs::SIZE_OPTIONS[i].1).unwrap_or(0);
                     let n = d.targets.len();
+                    let skip = if skipped > 0 { format!(", {skipped} already under {mb} MB") } else { String::new() };
                     if !cancelled {
                         if !failed.is_empty() {
-                            d.status = format!("Done \u{2014} {done}/{n} compressed, {} failed", failed.len());
+                            d.status = format!("Done \u{2014} {done}/{n} compressed{skip}, {} failed", failed.len());
                             d.status_color = c("#e0a05f");
+                        } else if done == 0 && skipped > 0 {
+                            d.status = if n == 1 { format!("Already under {mb} MB \u{2014} nothing to compress") } else { format!("All {n} clips are already under {mb} MB") };
+                            d.status_color = c("#FFFFFF");
                         } else {
                             let suffix = if n == 1 { "saved next to the original" } else { "saved next to the originals" };
-                            d.status = format!("Done  \u{2022}  {done}/{n} compressed  \u{2022}  {suffix}");
+                            d.status = format!("Done  \u{2022}  {done}/{n} compressed{skip}  \u{2022}  {suffix}");
                             d.status_color = c("#FFFFFF");
                         }
                         d.progress = Some(1.0);

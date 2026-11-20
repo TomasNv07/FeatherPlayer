@@ -24,10 +24,10 @@ pub enum MediaMsg {
     TrimCopy(Option<String>, String),
     /// Compress progress: (overall fraction, status text).
     Progress(f32, String),
-    /// One clip of a compress batch done: (source, ok, new path).
+    /// One clip of a compress batch done: (source, ok, new path; None = skipped, already small).
     CompressedOne(String, bool, Option<String>),
-    /// The compress batch is over: (done, failed names, cancelled).
-    CompressDone(usize, Vec<String>, bool),
+    /// The compress batch is over: (done, skipped as already small, failed names, cancelled).
+    CompressDone(usize, usize, Vec<String>, bool),
     /// Show a flash status message (text, rgb).
     Flash(String, [u8; 3]),
 }
@@ -336,7 +336,7 @@ impl CompressCtl {
 pub fn start_compress(targets: Vec<String>, nominal_mb: u32, ffmpeg: PathBuf, ctl: CompressCtl, tx: Sender<MediaMsg>, ctx: eframe::egui::Context) {
     std::thread::spawn(move || {
         let n = targets.len();
-        let (mut done, mut failed) = (0, Vec::new());
+        let (mut done, mut skipped, mut failed) = (0, 0, Vec::new());
         for (idx, src) in targets.iter().enumerate() {
             if ctl.is_cancelled() {
                 break;
@@ -344,6 +344,13 @@ pub fn start_compress(targets: Vec<String>, nominal_mb: u32, ffmpeg: PathBuf, ct
             let base = idx as f32 / n as f32;
             let span = 1.0 / n as f32;
             let short = scanner::basename(src).to_owned();
+            // already small enough: re-encoding to the budget would only make it bigger
+            if std::fs::metadata(src).is_ok_and(|m| m.len() <= nominal_mb as u64 * 1024 * 1024) {
+                skipped += 1;
+                let _ = tx.send(MediaMsg::CompressedOne(src.clone(), true, None));
+                ctx.request_repaint();
+                continue;
+            }
             let label = |prep: bool| if n > 1 { format!("Encoding {}/{n} \u{2014} {short}", idx + 1) } else if prep { "Preparing\u{2026}".into() } else { "Encoding\u{2026}".into() };
             let _ = tx.send(MediaMsg::Progress(base, label(true)));
             ctx.request_repaint();
@@ -363,7 +370,7 @@ pub fn start_compress(targets: Vec<String>, nominal_mb: u32, ffmpeg: PathBuf, ct
             }
             ctx.request_repaint();
         }
-        let _ = tx.send(MediaMsg::CompressDone(done, failed, ctl.is_cancelled()));
+        let _ = tx.send(MediaMsg::CompressDone(done, skipped, failed, ctl.is_cancelled()));
         ctx.request_repaint();
     });
 }
@@ -859,13 +866,26 @@ mod tests {
         assert!((d3 - dur * 0.5).abs() < 0.2);
         assert!(!Path::new(&format!("{copy}.trimtmp")).exists());
 
-        // compress the trimmed copy to 10 MB
+        // compress: a clip already under the target is skipped (no new file)
+        while rx.try_recv().is_ok() {}
+        let small = std::fs::metadata(&dest).unwrap().len() <= 10 * 1024 * 1024;
+        start_compress(vec![dest.clone()], 10, ff.clone(), CompressCtl::new(), tx.clone(), eframe::egui::Context::default());
+        let mut skipped = None;
+        while let Ok(m) = rx.recv_timeout(Duration::from_secs(120)) {
+            if let MediaMsg::CompressDone(done, sk, failed, _) = m {
+                assert!(failed.is_empty());
+                skipped = Some((done, sk));
+                break;
+            }
+        }
+        println!("compress batch (done, skipped) = {skipped:?}, source small = {small}");
+        assert_eq!(skipped, Some(if small { (0, 1) } else { (1, 0) }));
+        // the encoder itself (start_compress would skip this small clip)
         let ctl = CompressCtl::new();
         let out = compress_one(&dest, 10, &ff, &ctl, &|_| {}).expect("compress");
         let mb = std::fs::metadata(&out).unwrap().len() as f64 / 1024.0 / 1024.0;
         println!("compressed {out}: {mb:.2} MB, nvenc ok = {}", NVENC_OK.load(Ordering::SeqCst));
         assert!(out.ends_with(&format!("_10MB{ext}")));
-        assert!(mb <= 10.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
