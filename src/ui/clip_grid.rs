@@ -467,7 +467,8 @@ impl ClipGrid {
         let mut load_more = false;
         let mut load_all = false;
 
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, vp| {
+        // wheel + scrollbar only: egui's drag-to-scroll moved the list while dragging on cards
+        egui::ScrollArea::vertical().auto_shrink([false, false]).drag_to_scroll(false).show_viewport(ui, |ui, vp| {
             let w = ui.available_width();
             let cw = (w - 16.0).max(60.0);
             let ch = ((cw - CARD_BORDER * 2.0) * 9.0 / 16.0).floor();
