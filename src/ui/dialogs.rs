@@ -330,11 +330,13 @@ pub struct ConfirmDialog {
     pub more: usize,
     /// kind="error": amber, only an OK button.
     pub error: bool,
+    /// Optional checkbox under the note (label, state).
+    pub check: Option<(String, std::cell::Cell<bool>)>,
 }
 
 impl Default for ConfirmDialog {
     fn default() -> Self {
-        ConfirmDialog { title: String::new(), head: String::new(), details: Vec::new(), note: String::new(), yes_text: "Delete".into(), extra_text: None, extra2_text: None, extra2_neutral: false, more: 0, error: false }
+        ConfirmDialog { title: String::new(), head: String::new(), details: Vec::new(), note: String::new(), yes_text: "Delete".into(), extra_text: None, extra2_text: None, extra2_neutral: false, more: 0, error: false, check: None }
     }
 }
 
@@ -406,6 +408,30 @@ impl ConfirmDialog {
                         if !self.note.is_empty() {
                             ui.add_space(12.0);
                             ui.add(egui::Label::new(egui::RichText::new(&self.note).font(theme::font_ui()).color(theme::text_dim())).wrap());
+                        }
+                        if let Some((label, on)) = &self.check {
+                            ui.add_space(12.0);
+                            let font = theme::font_ui();
+                            let w = (26.0 + widgets::text_width(ui, label, &font)).min(col_w);
+                            let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 20.0), egui::Sense::click());
+                            if resp.clicked() {
+                                on.set(!on.get());
+                            }
+                            let b = egui::Rect::from_center_size(egui::pos2(r.left() + 8.0, r.center().y), Vec2::splat(16.0));
+                            let p = ui.painter();
+                            if on.get() {
+                                p.rect_filled(b, 5.0, theme::accent());
+                                super::icons::paint(ui, b.center(), "check", 12.0, theme::accent_fg(), false, 2.6);
+                            } else {
+                                let border = if resp.hovered() { theme::accent() } else { c("#52527e") };
+                                p.rect(b, 5.0, c("#242444"), egui::Stroke::new(1.0_f32, border), egui::StrokeKind::Inside);
+                            }
+                            let fg = if resp.hovered() || on.get() { theme::text_primary() } else { theme::text_muted() };
+                            let t = widgets::ellipsize(ui, label, &font, col_w - 26.0, true);
+                            ui.painter().text(egui::pos2(r.left() + 26.0, r.center().y), egui::Align2::LEFT_CENTER, t, font, fg);
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
                         }
                     });
                 });

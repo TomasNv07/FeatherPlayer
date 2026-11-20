@@ -1067,16 +1067,21 @@ impl FeatherApp {
             yes_text: "Apply trim".into(),
             extra2_text: Some("Save as copy".into()),
             extra2_neutral: true,
+            check: Some(("Mix the selected audio tracks into one track".into(), std::cell::Cell::new(prefs::read_settings().get_bool("trim_mix_audio", false)))),
             ..Default::default()
         };
         self.confirm_trim = Some((d, path));
     }
 
-    fn start_trim(&mut self, ctx: &egui::Context, path: String, as_copy: bool) {
+    /// `mix`: the audio tracks picked in the ♫ menu (at their volumes) become one track,
+    /// like Share; otherwise all tracks are copied. Rust-only setting `trim_mix_audio`.
+    fn start_trim(&mut self, ctx: &egui::Context, path: String, as_copy: bool, mix: bool) {
         let (Some(range), Some(ff)) = (self.prefs.trim_raw(&path), scanner::find_ffmpeg()) else { return };
+        prefs::save_setting("trim_mix_audio", Value::Bool(mix));
+        let audio = mix.then(|| self.tracks.export_snapshot(&path));
         self.trim_busy = true;
         self.view.flash(if as_copy { "Saving trimmed copy\u{2026}" } else { "Cutting clip\u{2026}" }, YELLOW);
-        media::start_trim(TrimJob { path, range, as_copy, use_gpu: self.trim_gpu, ffmpeg: ff }, self.media_tx.clone(), ctx.clone());
+        media::start_trim(TrimJob { path, range, as_copy, use_gpu: self.trim_gpu, ffmpeg: ff, audio }, self.media_tx.clone(), ctx.clone());
     }
 
     /// Python `_open_compress_dialog`: the selected clips, else the open one.
@@ -1578,10 +1583,11 @@ impl FeatherApp {
         if let Some((d, path)) = &self.confirm_trim {
             if let Some(choice) = d.show(ctx) {
                 let path = path.clone();
+                let mix = d.check.as_ref().is_some_and(|(_, on)| on.get());
                 self.confirm_trim = None;
                 match choice {
-                    Confirm::Yes => self.start_trim(ctx, path, false),
-                    Confirm::Extra2 => self.start_trim(ctx, path, true),
+                    Confirm::Yes => self.start_trim(ctx, path, false, mix),
+                    Confirm::Extra2 => self.start_trim(ctx, path, true, mix),
                     Confirm::Extra | Confirm::No => {}
                 }
             }

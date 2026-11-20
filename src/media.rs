@@ -179,10 +179,13 @@ pub struct TrimJob {
     pub as_copy: bool,
     pub use_gpu: bool,
     pub ffmpeg: PathBuf,
+    /// Some = mix these audio tracks into one track; None = copy all tracks.
+    pub audio: Option<crate::tracks::AudioSnap>,
 }
 
 /// Cut the clip down to the trim. Re-encodes the video (exact cut points) with NVENC or
-/// libx264, never above the source bitrate, and copies all audio tracks.
+/// libx264, never above the source bitrate, and copies all audio tracks (or mixes the
+/// selected ones into one, `TrimJob::audio`).
 pub fn start_trim(job: TrimJob, tx: Sender<MediaMsg>, ctx: eframe::egui::Context) {
     std::thread::spawn(move || {
         let path = job.path.clone();
@@ -223,10 +226,18 @@ fn run_trim(job: &TrimJob, tmp: &str, tx: &Sender<MediaMsg>) -> Result<Option<St
             dest = format!("{stem} (trimmed {k}){ext_raw}");
         }
     }
-    let mut args: Vec<String> = [ "-y", "-ss", &format!("{t0:.3}"), "-i", path, "-t", &format!("{:.3}", t1 - t0), "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // Fast seek to a bit before the start, then cut exactly after the input. With only the
+    // input -ss the copied audio started at the keyframe before t0 (these clips have one every
+    // ~4 s), so a 1 s trim became a ~4 s file with a blank start. The output -ss drops the
+    // copied packets before the cut too.
+    let pre = t0.min(5.0);
+    let mut args: Vec<String> = ["-y", "-ss", &format!("{:.3}", t0 - pre), "-i", path, "-ss", &format!("{pre:.3}"), "-t", &format!("{:.3}", t1 - t0)].iter().map(|s| s.to_string()).collect();
+    match &job.audio {
+        // the selected tracks at their volumes mixed into one track (like Share)
+        Some(snap) => args.extend(share_audio_args(path, snap, false, "192k", ff)),
+        None => args.extend(["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"].iter().map(|s| s.to_string())),
+    }
+    args.extend(["-map_metadata".into(), "0".into()]);
     let cpu_v = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"];
     let gpu_v = ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "19", "-b:v", "0"];
     let mut tail: Vec<String> = Vec::new();
@@ -236,7 +247,6 @@ fn run_trim(job: &TrimJob, tmp: &str, tx: &Sender<MediaMsg>) -> Result<Option<St
         let cap = src_kbps.max(500);
         tail.extend(["-maxrate".into(), format!("{cap}k"), "-bufsize".into(), format!("{}k", cap * 2)]);
     }
-    tail.extend(["-c:a".into(), "copy".into()]);
     if fmt == "mp4" || fmt == "mov" {
         tail.extend(["-movflags".into(), "+faststart".into()]);
     }
@@ -811,23 +821,42 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         // save as copy: 20%..60%
-        let job = TrimJob { path: copy.clone(), range: (2000.0, 6000.0), as_copy: true, use_gpu: true, ffmpeg: ff.clone() };
+        let job = TrimJob { path: copy.clone(), range: (2000.0, 6000.0), as_copy: true, use_gpu: true, ffmpeg: ff.clone(), audio: None };
         let dest = run_trim(&job, &format!("{copy}.trimtmp"), &tx).expect("trim copy").expect("dest");
         let d2 = video_duration(&dest, &ff);
         println!("trimmed copy {dest}: {d2:.2}s (want ~{:.2})", dur * 0.4);
-        // audio is copied (not re-cut), so the file can run a bit longer than the trim
-        assert!((d2 - dur * 0.4).abs() < 2.0);
+        assert!((d2 - dur * 0.4).abs() < 0.2);
         assert!(dest.ends_with(&format!("test (trimmed){ext}")));
         let m0 = std::fs::metadata(&copy).unwrap().modified().unwrap();
         assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), m0, "file date copied");
+        let n_audio = |p: &str| audio_handlers(p, &ff).map(|h| h.len()).unwrap_or(0);
+
+        // a 1 s cut from the middle (was ~4 s with a blank start: copied audio began at the keyframe)
+        let a = 5000.0;
+        let b = a + 10000.0 / dur;
+        let job = TrimJob { path: copy.clone(), range: (a, b), as_copy: true, use_gpu: true, ffmpeg: ff.clone(), audio: None };
+        let short = run_trim(&job, &format!("{copy}.trimtmp"), &tx).expect("short trim").expect("dest");
+        let ds = video_duration(&short, &ff);
+        println!("1 s trim: {ds:.3}s, {} audio tracks", n_audio(&short));
+        assert!((ds - 1.0).abs() < 0.1, "short trim is {ds}");
+        assert_eq!(n_audio(&short), n_audio(&copy));
+
+        // the same with the audio tracks mixed into one
+        let snap = crate::tracks::AudioSnap { sel: Some((1..=n_audio(&copy).min(2)).collect()), ..Default::default() };
+        let job = TrimJob { path: copy.clone(), range: (a, b), as_copy: true, use_gpu: true, ffmpeg: ff.clone(), audio: Some(snap) };
+        let mixed = run_trim(&job, &format!("{copy}.trimtmp"), &tx).expect("mixed trim").expect("dest");
+        let dm = video_duration(&mixed, &ff);
+        println!("1 s mixed trim: {dm:.3}s, {} audio tracks", n_audio(&mixed));
+        assert!((dm - 1.0).abs() < 0.1, "mixed trim is {dm}");
+        assert_eq!(n_audio(&mixed), 1);
 
         // in place: 0..50%
-        let job = TrimJob { path: copy.clone(), range: (0.0, 5000.0), as_copy: false, use_gpu: true, ffmpeg: ff.clone() };
+        let job = TrimJob { path: copy.clone(), range: (0.0, 5000.0), as_copy: false, use_gpu: true, ffmpeg: ff.clone(), audio: None };
         run_trim(&job, &format!("{copy}.trimtmp"), &tx).expect("trim in place");
         assert!(matches!(rx.try_recv(), Ok(MediaMsg::ReleaseFile(_))));
         let d3 = video_duration(&copy, &ff);
         println!("trimmed in place: {d3:.2}s (want ~{:.2})", dur * 0.5);
-        assert!((d3 - dur * 0.5).abs() < 2.0);
+        assert!((d3 - dur * 0.5).abs() < 0.2);
         assert!(!Path::new(&format!("{copy}.trimtmp")).exists());
 
         // compress the trimmed copy to 10 MB
