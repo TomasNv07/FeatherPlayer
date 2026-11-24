@@ -1126,7 +1126,11 @@ impl FeatherApp {
                     if let Some((x, y, w, h)) = window::window_rect(self.win.hwnd) {
                         let ppp = ctx.pixels_per_point();
                         let fixed_h = h as f32 - video.height() * ppp;
-                        let target_h = (video.width() * ppp / ar).round() as i32 + fixed_h.round() as i32;
+                        let mut target_h = (video.width() * ppp / ar).round() as i32 + fixed_h.round() as i32;
+                        // never taller than the screen's work area (small screens)
+                        if let Some((_, _, _, wh)) = window::work_area(self.win.hwnd) {
+                            target_h = target_h.min(wh);
+                        }
                         if (target_h - h).abs() > 1 {
                             window::set_outer_rect(self.win.hwnd, x, y, w, target_h);
                         }

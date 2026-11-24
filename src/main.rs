@@ -57,9 +57,11 @@ fn main() -> eframe::Result<()> {
     if !window::check_single_instance() {
         return Ok(()); // another instance was asked to show itself
     }
-    // Python: geometry 1160x650, minsize 860x480; the native frame is replaced by our title bar
+    // Python: geometry 1160x650, minsize 860x480; the native frame is replaced by our title bar.
+    // Owner's change 2026-11-24: a bit bigger by default (the height is then fitted 0.5 s after
+    // start so the video is 16:9, `FeatherApp::fit_16_9`)
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1160.0, 650.0])
+        .with_inner_size([1360.0, 810.0])
         .with_min_inner_size([860.0, 480.0])
         .with_title("Feather Player")
         .with_decorations(false)

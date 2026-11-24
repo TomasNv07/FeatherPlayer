@@ -402,7 +402,8 @@ impl SettingsPage {
             });
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::bg()).stroke(egui::Stroke::new(1.0_f32, c("#242444")))).show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // owner: egui's 40 px per wheel notch was too slow here; 3x = 120 px
+            egui::ScrollArea::vertical().auto_shrink([false, false]).wheel_scroll_multiplier(Vec2::new(1.0, 3.0)).show(ui, |ui| {
                 let w = ui.available_width();
                 let col_w = (w - 48.0).clamp(300.0, 620.0);
                 ui.add_space(26.0);
