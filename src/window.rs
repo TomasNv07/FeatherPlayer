@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, IsZoomed, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-    SW_RESTORE, SW_SHOWMINNOACTIVE, WINDOWPLACEMENT, WPF_SETMINPOSITION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    SW_RESTORE, SW_SHOWMINNOACTIVE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED, WPF_SETMINPOSITION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const SINGLE_INSTANCE_MUTEX: &str = "ClipsVideoPlayerApp_SingleInstance_Mutex";
@@ -111,6 +111,10 @@ pub fn hide_to_tray(hwnd: HWND) {
         return;
     }
     unsafe {
+        // GetWindowPlacement of a maximised window has no WPF_RESTORETOMAXIMIZED (that flag is
+        // only set for a window minimised from maximised), so without it the window came back
+        // from the tray at its normal size and that size was then saved over "max"
+        let was_max = IsZoomed(hwnd) != 0;
         ShowWindow(hwnd, SW_HIDE); // the taskbar only notices the style change while hidden
         set_ex_style(hwnd, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW);
         // a minimized tool window is parked at the bottom-left of the screen (a small caption
@@ -119,6 +123,9 @@ pub fn hide_to_tray(hwnd: HWND) {
         wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         if GetWindowPlacement(hwnd, &mut wp) != 0 {
             wp.flags |= WPF_SETMINPOSITION;
+            if was_max {
+                wp.flags |= WPF_RESTORETOMAXIMIZED;
+            }
             wp.ptMinPosition = POINT { x: -32000, y: -32000 };
             wp.showCmd = SW_SHOWMINNOACTIVE as _;
             SetWindowPlacement(hwnd, &wp);

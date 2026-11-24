@@ -1,11 +1,12 @@
 ﻿//! Settings page (Python `_build_settings_page`): replaces the main window while open.
 //! All of Python's sections: Appearance (theme dropdown, accent colour picker), Starred clips,
-//! Cloud sync, Phone sync, Playback, Audio, Trimming, Clips, Window, and the Keyboard
+//! Cloud sync (+ Share clip info for ClipSync, Rust only), Phone (ClipSync over the network, Rust only), Playback, Audio, Trimming, Clips, Window, and the Keyboard
 //! shortcuts / Hidden features cards.
 
 use super::widgets::{self, ellipsize, Ghost, Row};
 use crate::library::{Library, NONE_KEY};
-use crate::sync::{cloud_kind, phone_kind, Cloud, DotKind, Phone};
+use crate::lan::Lan;
+use crate::sync::{cloud_kind, Cloud, DotKind};
 use crate::theme::{self, c};
 use crate::tracks::AudioTracks;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
@@ -17,12 +18,12 @@ pub enum SettingsAction {
     CloudToggle(bool),
     ChooseCloudFolder,
     CloudMode(&'static str),
+    CloudShareInfo(bool),
+    LanToggle(bool),
+    LanNewCode,
     CloudGame(String),
     CloudSync,
     CloudDeleteAll,
-    PhoneToggle(bool),
-    PhoneKind(&'static str),
-    PhoneSync,
     Loop(bool),
     StartAlways(bool),
     TrimGpu(bool),
@@ -44,7 +45,7 @@ pub enum SettingsAction {
     ClearCache,
 }
 
-/// Values the page shows (the rest is read from `Cloud` / `Phone`).
+/// Values the page shows (the rest is read from `Cloud`).
 pub struct SettingsValues<'a> {
     pub star_copy: bool,
     pub star_folder: &'a str,
@@ -384,7 +385,7 @@ fn status_row(ui: &mut egui::Ui, text: &str, kind: DotKind) -> bool {
 }
 
 impl SettingsPage {
-    pub fn show(&mut self, ctx: &egui::Context, v: &SettingsValues, cloud: &Cloud, phone: &mut Phone, lib: &Library) -> Vec<SettingsAction> {
+    pub fn show(&mut self, ctx: &egui::Context, v: &SettingsValues, cloud: &Cloud, lan: &Lan, lib: &Library) -> Vec<SettingsAction> {
         let mut acts = Vec::new();
         let mut games_btn = Rect::NOTHING;
         let mut theme_field = Rect::NOTHING;
@@ -523,6 +524,12 @@ impl SettingsPage {
                                 });
                             });
                             divider(ui);
+                            row(ui, "Share clip info with ClipSync", "Also puts clips.json (game, liked, starred, trims) and thumbnails in the cloud folder, so the ClipSync phone app can show them", |ui| {
+                                if toggle(ui, cloud.share_info) {
+                                    acts.push(SettingsAction::CloudShareInfo(!cloud.share_info));
+                                }
+                            });
+                            divider(ui);
                             let st = cloud.status();
                             if status_row(ui, &st, cloud_kind(&st)) {
                                 acts.push(SettingsAction::CloudSync);
@@ -537,44 +544,26 @@ impl SettingsPage {
                             });
                         });
 
-                        section(ui, "PHONE SYNC", |ui| {
-                            row(ui, "Sync clips to phone", "Send clips to the ClipSync app on your phone", |ui| {
-                                if toggle(ui, phone.enabled) {
-                                    acts.push(SettingsAction::PhoneToggle(!phone.enabled));
+                        section(ui, "PHONE (CLIPSYNC)", |ui| {
+                            row(ui, "Share clips with ClipSync on this network", "The phone copies new clips straight from this PC when it's on the same Wi-Fi (the same clips as cloud sync), else from the cloud folder", |ui| {
+                                if toggle(ui, lan.enabled) {
+                                    acts.push(SettingsAction::LanToggle(!lan.enabled));
                                 }
                             });
-                            if phone.enabled {
+                            if lan.enabled {
                                 divider(ui);
-                                row(ui, "Pairing code", "Shown at the top of the ClipSync app on your phone", |ui| {
-                                    widgets::entry(ui, &mut phone.code, 90.0);
-                                });
-                                divider(ui);
-                                row(ui, "Phone address (optional)", "Leave empty: your phone is found automatically on the same network", |ui| {
-                                    widgets::entry(ui, &mut phone.manual_ip, 140.0);
-                                });
-                                divider(ui);
-                                row(ui, "Clips to send", "Pick one or more. All clips sends every clip in your folders", |ui| {
+                                row(ui, "Pairing code", "Type this once in ClipSync's settings", |ui| {
                                     field(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing = Vec2::ZERO;
-                                            let opts = [("all", "All clips"), ("trimmed", "Trimmed"), ("liked", "Liked"), ("starred", "Starred")];
-                                            for (i, (key, label)) in opts.into_iter().enumerate() {
-                                                if i > 0 {
-                                                    widgets::pill_divider(ui);
-                                                }
-                                                let fg = if phone.kinds.contains(key) { theme::accent() } else { theme::text_muted() };
-                                                if Ghost::new(label).font(theme::font_ui()).fg(fg).show(ui).clicked() {
-                                                    acts.push(SettingsAction::PhoneKind(key));
-                                                }
-                                            }
-                                        });
+                                        if Ghost::new("New code").icon("refresh", 16.0).font(theme::font_ui()).fg(theme::text_primary()).show(ui).on_hover_text("The phone has to type the new code").clicked() {
+                                            acts.push(SettingsAction::LanNewCode);
+                                        }
                                     });
+                                    ui.add_space(10.0);
+                                    ui.label(egui::RichText::new(&lan.code).font(theme::font_bold()).color(theme::accent()));
                                 });
                                 divider(ui);
-                                let st = phone.status();
-                                if status_row(ui, &st, phone_kind(&st)) {
-                                    acts.push(SettingsAction::PhoneSync);
-                                }
+                                let st = lan.status();
+                                row(ui, "This PC", &format!("{}  •  {st}", lan.address()), |_ui| {});
                             }
                         });
 

@@ -11,7 +11,8 @@
 //!   library - the clip list: sort, filter, visible count, selection
 //!   playback - trim mode / loop / seeking rules on top of the player
 //!   media   - ffmpeg jobs: apply trim, compress
-//!   sync    - cloud folder sync, phone (ClipSync) sync, starred copy, Recycle Bin
+//!   sync    - cloud folder sync (+ clip info for ClipSync), starred copy, Recycle Bin
+//!   lan     - shares the cloud-sync clips with ClipSync on the same network (phone pulls)
 //!   window  - Win32: DWM frame, window rect, single instance, Start with Windows
 //!   tray    - tray icon while the window is hidden
 //!   tracks  - audio tracks editor: defaults, per-clip tracks/volumes, SteelSeries
@@ -19,6 +20,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod lan;
 mod library;
 mod media;
 mod playback;

@@ -6,7 +6,7 @@ use crate::playback::Playback;
 use crate::player::{Player, Start};
 use crate::prefs::{self, JsonGet, Prefs};
 use crate::scanner::{self, Msg, Scanner};
-use crate::sync::{self, Cloud, Phone, PhoneSnap};
+use crate::sync::{self, ClipMeta, Cloud};
 use crate::theme::{self, c};
 use crate::ui::clip_grid::{Badges, ClipGrid, GridAction};
 use crate::ui::dialogs::{CategorizeDialog, CompressAction, CompressDialog, Confirm, ConfirmDialog, RenameDialog, ShareDialog};
@@ -76,7 +76,7 @@ pub struct FeatherApp {
     media_rx: Receiver<MediaMsg>,
     egui_ctx: egui::Context,
     cloud: Cloud,
-    phone: Phone,
+    lan: crate::lan::Lan,
     settings: SettingsPage,
     settings_open: bool,
     settings_seen: bool,
@@ -286,7 +286,7 @@ impl FeatherApp {
             media_rx,
             egui_ctx: cc.egui_ctx.clone(),
             cloud: Cloud::new(cc.egui_ctx.clone()),
-            phone: Phone::new(),
+            lan: crate::lan::Lan::new(cc.egui_ctx.clone()),
             settings: SettingsPage::default(),
             settings_open: false,
             settings_seen: false,
@@ -1468,11 +1468,16 @@ impl FeatherApp {
                 self.choose_cloud_folder();
             }
             SettingsAction::CloudMode(m) => self.cloud.set_mode(m),
+            SettingsAction::CloudShareInfo(on) => self.cloud.set_share_info(on),
+            SettingsAction::LanToggle(on) => self.lan.set_enabled(on),
+            SettingsAction::LanNewCode => self.lan.new_code(),
             SettingsAction::CloudGame(k) => self.cloud.pick_game(&k),
             SettingsAction::CloudSync => {
                 let folders = self.prefs.checked_folders.clone();
-                if !self.cloud.sync_now(&folders, &self.prefs.keyword_groups) && self.choose_cloud_folder() {
-                    self.cloud.sync_now(&folders, &self.prefs.keyword_groups);
+                let (prefs, lib) = (&self.prefs, &self.lib);
+                if !self.cloud.sync_now(&folders, &prefs.keyword_groups, || clip_meta(prefs, lib)) && self.choose_cloud_folder() {
+                    let (prefs, lib) = (&self.prefs, &self.lib);
+                    self.cloud.sync_now(&folders, &prefs.keyword_groups, || clip_meta(prefs, lib));
                 }
             }
             SettingsAction::CloudDeleteAll => match self.cloud.count_cloud_clips() {
@@ -1487,23 +1492,6 @@ impl FeatherApp {
                     });
                 }
             },
-            SettingsAction::PhoneToggle(on) => self.phone.set_enabled(on),
-            SettingsAction::PhoneKind(k) => self.phone.toggle_kind(k),
-            SettingsAction::PhoneSync => {
-                let p = &self.prefs;
-                let trims = p.trim_enabled.iter().filter_map(|t| p.trim_raw(t).map(|r| (t.clone(), r))).collect();
-                let snap = PhoneSnap {
-                    kinds: self.phone.kinds.clone(),
-                    starred: p.starred.clone(),
-                    liked: p.liked.clone(),
-                    trim_enabled: p.trim_enabled.clone(),
-                    trims,
-                    folders: p.checked_folders.clone(),
-                    groups: p.keyword_groups.clone(),
-                    labels: self.lib.cats.norm_map.clone(),
-                };
-                self.phone.sync_now(snap, scanner::find_ffmpeg(), ctx.clone());
-            }
             SettingsAction::Loop(on) => {
                 self.pb.loop_clip = on;
                 prefs::save_setting("loop_clip", Value::Bool(on));
@@ -1734,7 +1722,10 @@ impl eframe::App for FeatherApp {
             if let Ok(p) = &mut self.player {
                 p.poll();
             }
-            self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
+            let (prefs, lib) = (&self.prefs, &self.lib);
+            self.cloud.tick(&prefs.checked_folders, &prefs.keyword_groups, || clip_meta(prefs, lib));
+            let cloud = &self.cloud;
+            self.lan.tick(|| cloud.lan_input(&prefs.checked_folders, &prefs.keyword_groups, clip_meta(prefs, lib)));
             ctx.request_repaint_after(Duration::from_secs(5));
             return;
         }
@@ -1783,7 +1774,10 @@ impl eframe::App for FeatherApp {
         p.autoplay_tick();
         self.pb.tick(p);
         // cloud sync every 5 s, also while the settings page is open
-        self.cloud.tick(&self.prefs.checked_folders, &self.prefs.keyword_groups);
+        let (prefs, lib) = (&self.prefs, &self.lib);
+        self.cloud.tick(&prefs.checked_folders, &prefs.keyword_groups, || clip_meta(prefs, lib));
+        let cloud = &self.cloud;
+        self.lan.tick(|| cloud.lan_input(&prefs.checked_folders, &prefs.keyword_groups, clip_meta(prefs, lib)));
         ctx.request_repaint_after(Duration::from_secs(5));
         self.folder_watch_tick(ctx);
 
@@ -1804,7 +1798,7 @@ impl eframe::App for FeatherApp {
                 see_more_step: self.lib.see_more_step,
                 cache_info: &self.cache_info,
             };
-            let acts = self.settings.show(ctx, &v, &self.cloud, &mut self.phone, &self.lib);
+            let acts = self.settings.show(ctx, &v, &self.cloud, &self.lan, &self.lib);
             for a in acts {
                 self.settings_action(ctx, a);
             }
@@ -1924,5 +1918,22 @@ impl eframe::App for FeatherApp {
         if let Some(sb) = &self.standby {
             sb.shutdown(gl);
         }
+    }
+}
+
+/// What cloud sync's "Share clip info" writes to clips.json, copied from prefs (UI thread).
+fn clip_meta(p: &Prefs, lib: &Library) -> ClipMeta {
+    ClipMeta {
+        starred: p.starred.clone(),
+        liked: p.liked.clone(),
+        trims: p.trim_enabled.iter().filter_map(|t| p.trim_raw(t).map(|r| (t.clone(), r))).collect(),
+        durations: p
+            .raw
+            .get("durations")
+            .and_then(|d| d.as_object())
+            .map(|d| d.iter().filter_map(|(k, v)| Some((k.clone(), scanner::parse_dur(v.as_str()?)?))).collect())
+            .unwrap_or_default(),
+        groups: p.keyword_groups.clone(),
+        labels: lib.cats.norm_map.clone(),
     }
 }

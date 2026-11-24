@@ -468,11 +468,17 @@ impl ClipGrid {
         let mut load_all = false;
 
         // wheel + scrollbar only: egui's drag-to-scroll moved the list while dragging on cards
-        egui::ScrollArea::vertical().auto_shrink([false, false]).drag_to_scroll(false).show_viewport(ui, |ui, vp| {
-            let w = ui.available_width();
+        // one wheel notch scrolls half a card (egui turns a notch into `line_scroll_speed` points)
+        let row_h = |w: f32| {
             let cw = (w - 16.0).max(60.0);
             let ch = ((cw - CARD_BORDER * 2.0) * 9.0 / 16.0).floor();
-            let rh = ch + 22.0 + PAD * 2.0;
+            (cw, ch, ch + 22.0 + PAD * 2.0)
+        };
+        let line = ctx.options(|o| o.input_options.line_scroll_speed).max(1.0);
+        let wheel = row_h(ui.available_width()).2 / 2.0 / line;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL).wheel_scroll_multiplier(Vec2::new(1.0, wheel)).show_viewport(ui, |ui, vp| {
+            let w = ui.available_width();
+            let (cw, ch, rh) = row_h(w);
             let extra = if total > n { 76.0 } else { 0.0 };
             let total_h = n as f32 * rh + PAD + extra;
             let (area, _) = ui.allocate_exact_size(Vec2::new(w, total_h), Sense::hover());
