@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn paths_and_repr() {
-        assert_eq!(join("Z:/All clips/Clips", "a.mkv"), "Z:/All clips/Clips\\a.mkv");
+        assert_eq!(join("D:/My Clips", "a.mkv"), "D:/My Clips\\a.mkv");
         assert_eq!(join("Z:/", "a.mkv"), "Z:/a.mkv");
         assert_eq!(py_float_repr(1717171717.0), "1717171717.0");
         assert_eq!(py_float_repr(1717171717.1234567), "1717171717.1234567");

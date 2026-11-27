@@ -181,7 +181,7 @@ impl Win {
     }
 }
 
-/// Folder from a dialog, written like Tk's askdirectory ("Z:/All clips/Clips"), since folder
+/// Folder from a dialog, written like Tk's askdirectory ("D:/Clips"), since folder
 /// strings are part of every clip path key in prefs.
 fn tk_dir(p: PathBuf) -> String {
     p.to_string_lossy().replace('\\', "/")
