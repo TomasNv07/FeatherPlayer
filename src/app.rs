@@ -26,6 +26,19 @@ use std::time::{Duration, Instant};
 
 /// Python `_SEE_MORE` choices for "Load more".
 const SEE_MORE_STEPS: [usize; 6] = [25, 50, 100, 200, 500, 1000];
+
+// TEMP frame timing for FP_DEBUG_FRAMES (see `update`)
+static DBG_GAP_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DBG_UPD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static DBG_LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+struct DbgTimer(Instant);
+impl Drop for DbgTimer {
+    fn drop(&mut self) {
+        DBG_UPD_US.fetch_max(self.0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 /// New durations are written to prefs at most this often (Python saved after every single one).
 const DUR_SAVE_DELAY: Duration = Duration::from_secs(2);
 
@@ -1710,6 +1723,16 @@ fn cut60(s: &str) -> String {
 
 impl eframe::App for FeatherApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // TEMP (FP_DEBUG_FRAMES): slowest update() and longest gap between frames per second
+        let _dbg = std::env::var_os("FP_DEBUG_FRAMES").is_some().then(|| {
+            let now = Instant::now();
+            DBG_LAST.with(|l| {
+                if let Some(prev) = l.replace(Some(now)) {
+                    DBG_GAP_US.fetch_max((now - prev).as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            DbgTimer(now)
+        });
         // players that aren't on screen still have to render when mpv asks (else libmpv waits
         // 200 ms per frame): the preloading one, and the open one while its clip loads
         if let Some(gl) = frame.gl() {
@@ -1737,7 +1760,9 @@ impl eframe::App for FeatherApp {
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("target/frames_debug.txt") {
                     let causes: Vec<String> = ctx.repaint_causes().iter().map(|c| c.to_string()).collect();
                     let mpv_cb = crate::mpv::UPDATE_CALLS.swap(0, std::sync::atomic::Ordering::Relaxed);
-                    let _ = writeln!(f, "{n} frames/s hidden={} mpv_update_cb={mpv_cb} causes={causes:?} events={evs}", self.win.hidden);
+                    let gap = DBG_GAP_US.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000;
+                    let upd = DBG_UPD_US.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000;
+                    let _ = writeln!(f, "{n} frames/s max_gap={gap}ms max_update={upd}ms hidden={} mpv_update_cb={mpv_cb} causes={causes:?} events={}", self.win.hidden, evs.len());
                 }
                 n = 0;
                 t0 = Some(Instant::now());
