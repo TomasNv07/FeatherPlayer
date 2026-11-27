@@ -1923,6 +1923,9 @@ impl eframe::App for FeatherApp {
         if self.was_fullscreen != fullscreen {
             self.was_fullscreen = fullscreen;
             window::set_fullscreen_frame(self.win.hwnd, fullscreen, theme::bg());
+            if let Ok(p) = &self.player {
+                p.resize_now();
+            }
         }
         if video.width() > 16.0 && video.height() > 16.0 {
             let ppp = ctx.pixels_per_point();

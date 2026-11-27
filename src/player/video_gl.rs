@@ -26,9 +26,18 @@ pub struct VideoGl {
     want_since: Option<Instant>,
     /// The texture holds a rendered picture at its current size.
     valid: bool,
+    /// Until then a new size is used at once, without the resize debounce (entering /
+    /// leaving fullscreen is one jump: the debounce showed the old picture with black bars
+    /// for a moment).
+    instant_until: Option<Instant>,
 }
 
 impl VideoGl {
+    /// The next size change (within 500 ms) is applied right away.
+    pub fn resize_now(&mut self) {
+        self.instant_until = Some(Instant::now() + Duration::from_millis(500));
+    }
+
     fn ensure(&mut self, gl: &glow::Context, w: i32, h: i32) {
         unsafe {
             if self.fbo.is_none() || (self.w, self.h) != (w, h) {
@@ -110,7 +119,8 @@ pub fn video_callback(core: Arc<mpv::Core>, vgl: Arc<Mutex<VideoGl>>, rect: Rect
                 st.want = (w, h);
                 st.want_since = Some(Instant::now());
             }
-            let settled = st.want_since.is_none_or(|t| t.elapsed() >= RESIZE_SETTLE);
+            let instant = st.instant_until.is_some_and(|t| Instant::now() < t);
+            let settled = instant || st.want_since.is_none_or(|t| t.elapsed() >= RESIZE_SETTLE);
             // keep the current texture while resizing (none yet: allocate right away)
             if settled || st.w <= 0 || st.h <= 0 {
                 st.ensure(gl, w, h);

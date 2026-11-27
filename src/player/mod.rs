@@ -507,6 +507,11 @@ impl Player {
         }
     }
 
+    /// Entering / leaving fullscreen: render at the new size right away (no resize debounce).
+    pub fn resize_now(&self) {
+        self.vgl.lock().unwrap().resize_now();
+    }
+
     pub fn video_callback(&self, rect: egui::Rect) -> egui::PaintCallback {
         video_gl::video_callback(self.core.clone(), self.vgl.clone(), rect)
     }
