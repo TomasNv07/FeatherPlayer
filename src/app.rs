@@ -85,6 +85,8 @@ pub struct FeatherApp {
     updater: crate::update::Updater,
     /// The update window (progress bar) is open.
     update_popup: bool,
+    /// "Restart now" was clicked: the window is hidden while the installer runs.
+    update_restarting: bool,
     settings: SettingsPage,
     settings_open: bool,
     settings_seen: bool,
@@ -305,6 +307,7 @@ impl FeatherApp {
             lan: crate::lan::Lan::new(cc.egui_ctx.clone()),
             updater: crate::update::Updater::start(cc.egui_ctx.clone()),
             update_popup: false,
+            update_restarting: false,
             settings: SettingsPage::default(),
             settings_open: false,
             settings_seen: false,
@@ -449,6 +452,25 @@ impl FeatherApp {
         }
         self.win.hidden = true;
         window::hide_to_tray(self.win.hwnd);
+    }
+
+    /// Update window's "Restart now" (owner 2026-11-28): stop the clip, hide the window right
+    /// away (looks like the app closed) and run the installer; it closes this hidden app when
+    /// it replaces the files and starts the new version. The UI keeps running hidden (so the
+    /// close request and a failed install are still noticed); no tray icon.
+    fn restart_for_update(&mut self) {
+        let crate::update::Phase::Ready(path) = self.updater.info().phase else { return };
+        if let Ok(p) = &mut self.player {
+            self.prefs.volume = p.volume.round() as i64;
+            p.close();
+        }
+        self.release_preload(None);
+        self.prefs.save();
+        self.update_popup = false;
+        self.update_restarting = true;
+        window::set_fullscreen(false);
+        window::hide_to_tray(self.win.hwnd);
+        self.updater.install(&path);
     }
 
     /// Python `_restore_window` / the restore signal from a second launch.
@@ -1459,8 +1481,12 @@ impl FeatherApp {
     fn settings_action(&mut self, ctx: &egui::Context, a: SettingsAction) {
         match a {
             SettingsAction::Update => {
-                self.update_popup = true;
-                self.updater.download(ctx);
+                if matches!(self.updater.info().phase, crate::update::Phase::Ready(_)) {
+                    self.restart_for_update(); // downloaded earlier, "Later" was chosen
+                } else {
+                    self.update_popup = true;
+                    self.updater.download(ctx);
+                }
             }
             SettingsAction::Close => {
                 self.settings_open = false;
@@ -1820,22 +1846,27 @@ impl eframe::App for FeatherApp {
         ctx.request_repaint_after(Duration::from_secs(5));
         self.folder_watch_tick(ctx);
 
-        // in-app update: downloaded -> start the silent installer but stay open; the installer
-        // asks us to close (window::quit_requested) right before it replaces the files
+        // in-app update (owner 2026-11-28): downloaded -> "Restart now" in the update window;
+        // that hides the app and runs the installer, which closes us (window::quit_requested)
+        // right before it replaces the files and then starts the new version, so it looks like
+        // a plain restart
         use crate::update::Phase;
-        let mut update = self.updater.info();
-        if let Phase::Ready(path) = &update.phase {
-            self.updater.install(path);
-            update = self.updater.info();
-        }
+        let update = self.updater.info();
         if update.phase == Phase::Installing {
             self.updater.check_installer();
             ctx.request_repaint_after(Duration::from_millis(300));
+        }
+        if self.update_restarting && matches!(update.phase, Phase::Error(_)) {
+            // the install failed: show the window again, with the error
+            self.update_restarting = false;
+            self.update_popup = true;
+            window::restore_from_tray(self.win.hwnd);
         }
         if self.update_popup {
             match crate::ui::dialogs::update_window(ctx, &update) {
                 Some(crate::ui::dialogs::UpdateAct::Cancel) => self.updater.cancel(),
                 Some(crate::ui::dialogs::UpdateAct::Retry) => self.updater.download(ctx),
+                Some(crate::ui::dialogs::UpdateAct::Restart) => self.restart_for_update(),
                 Some(crate::ui::dialogs::UpdateAct::Close) => self.update_popup = false,
                 None => {}
             }

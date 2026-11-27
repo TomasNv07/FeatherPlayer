@@ -488,6 +488,8 @@ impl ConfirmDialog {
 pub enum UpdateAct {
     Cancel,
     Retry,
+    /// "Restart now" once the update is downloaded.
+    Restart,
     Close,
 }
 
@@ -514,12 +516,13 @@ pub fn update_window(ctx: &egui::Context, info: &crate::update::Info) -> Option<
                     let d = if *total > 0 { format!("{:.0} %   {:.1} / {:.1} MB", f * 100.0, mb(*got), mb(*total)) } else { format!("{:.1} MB", mb(*got)) };
                     (format!("Downloading version {}\u{2026}", info.latest), Some(f), d, theme::text_muted())
                 }
-                Phase::Ready(_) | Phase::Installing => (
-                    format!("Installing version {}\u{2026}", info.latest),
-                    None,
-                    "Feather Player closes and the new version opens by itself in a moment.".to_owned(),
+                Phase::Ready(_) => (
+                    format!("Version {} is ready", info.latest),
+                    Some(1.0),
+                    "Restart Feather Player to finish the update.".to_owned(),
                     theme::text_muted(),
                 ),
+                Phase::Installing => (format!("Restarting\u{2026}"), None, String::new(), theme::text_muted()),
                 Phase::Error(e) => ("The update didn't work".to_owned(), Some(0.0), e.clone(), theme::ERROR),
                 _ => (String::new(), Some(0.0), String::new(), theme::text_muted()),
             };
@@ -549,6 +552,7 @@ pub fn update_window(ctx: &egui::Context, info: &crate::update::Info) -> Option<
         // buttons
         let buttons: &[(&str, u8)] = match info.phase {
             Phase::Downloading(..) => &[("Cancel", 0)],
+            Phase::Ready(_) => &[("Later", 2), ("Restart now", 3)],
             Phase::Error(_) => &[("Close", 2), ("Try again", 1)],
             _ => &[],
         };
@@ -562,7 +566,7 @@ pub fn update_window(ctx: &egui::Context, info: &crate::update::Info) -> Option<
                         if i > 0 {
                             ui.add_space(8.0);
                         }
-                        let accent = *id == 1;
+                        let accent = *id == 1 || *id == 3;
                         let (fg, bg, hov) = if accent {
                             (theme::accent_fg(), theme::accent(), theme::mix(theme::accent(), egui::Color32::WHITE, 0.15))
                         } else {
@@ -572,6 +576,7 @@ pub fn update_window(ctx: &egui::Context, info: &crate::update::Info) -> Option<
                             act = Some(match id {
                                 0 => UpdateAct::Cancel,
                                 1 => UpdateAct::Retry,
+                                3 => UpdateAct::Restart,
                                 _ => UpdateAct::Close,
                             });
                         }
