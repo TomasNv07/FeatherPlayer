@@ -96,6 +96,11 @@ pub struct Badges<'a> {
 }
 
 impl ClipGrid {
+    /// A dropdown (game / filter / sort / calendar) is open.
+    pub fn popup_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, lib: &mut Library, prefs: &Prefs, badges: &Badges) -> Vec<GridAction> {
         let mut acts = Vec::new();
         self.hovered = None;

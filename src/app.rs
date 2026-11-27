@@ -49,6 +49,8 @@ pub struct FeatherApp {
     video_px: (i32, i32),
     /// Last frame's fullscreen state (square window corners while fullscreen).
     was_fullscreen: bool,
+    /// Fullscreen: the clip list is slid in from the right edge.
+    fs_sidebar: bool,
     /// `track_cache` has new entries to save (at most every 2 s).
     tracks_dirty: Option<Instant>,
     pb: Playback,
@@ -268,6 +270,7 @@ impl FeatherApp {
             track_cache: load_track_cache(),
             video_px: (1280, 720),
             was_fullscreen: false,
+            fs_sidebar: false,
             tracks_dirty: None,
             pb: Playback::new(st.get_bool("loop_clip", false)),
             lib: Library::new(step),
@@ -1112,6 +1115,35 @@ impl FeatherApp {
         self.compress = Some((CompressDialog::new(targets, thumb), CompressCtl::new()));
     }
 
+    /// Fullscreen clip list (owner 2026-11-28): slides in over the video when the pointer
+    /// touches the right edge of the screen, stays while the pointer is on it or one of its
+    /// dropdowns is open, and goes away when the pointer leaves it.
+    fn fullscreen_sidebar(&mut self, ctx: &egui::Context) -> Vec<GridAction> {
+        const W: f32 = 320.0;
+        let screen = ctx.content_rect();
+        let panel = egui::Rect::from_min_max(egui::pos2(screen.right() - W, screen.top()), screen.max);
+        let pos = ctx.input(|i| i.pointer.hover_pos());
+        if pos.is_some_and(|p| p.x >= screen.right() - 4.0) {
+            self.fs_sidebar = true;
+        } else if self.fs_sidebar && !self.grid.popup_open() && pos.is_some_and(|p| p.x < panel.left() - 12.0) {
+            self.fs_sidebar = false;
+        }
+        if !self.fs_sidebar {
+            return Vec::new();
+        }
+        let mut acts = Vec::new();
+        let badges = Badges { audio: &self.tracks.badges };
+        egui::Area::new(egui::Id::new("fs_sidebar")).fixed_pos(panel.min).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(theme::sidebar_bg()).stroke(egui::Stroke::new(1.0_f32, theme::c("#242444"))).show(ui, |ui| {
+                ui.set_width(W);
+                ui.set_height(panel.height());
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default); // the fullscreen overlay may have hidden it
+                acts = self.grid.show(ui, &mut self.lib, &self.prefs, &badges);
+            });
+        });
+        acts
+    }
+
     /// Python `_fit_video_16_9` (once, 0.5 s after start: window height so the video area is
     /// 16:9, unless a remembered size was restored) and `_sync_sash_16_9` (after the window
     /// size changes, not in the first 3 s: the clip sidebar gets whatever width makes the
@@ -1857,6 +1889,9 @@ impl eframe::App for FeatherApp {
         let video = self.view.video(ctx, p, &mut self.pb);
         if fullscreen {
             view_acts = self.view.fullscreen_overlay(ctx, p, &mut self.pb, video);
+            grid_acts = self.fullscreen_sidebar(ctx);
+        } else {
+            self.fs_sidebar = false;
         }
         if self.was_fullscreen != fullscreen {
             self.was_fullscreen = fullscreen;
