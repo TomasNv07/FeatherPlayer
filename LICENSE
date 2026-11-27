@@ -1,0 +1,19 @@
+Copyright (c) 2026 TomasNv. All rights reserved.
+
+Feather Player License
+
+Permission is granted to download and use this software free of charge for personal, non-commercial purposes.
+
+You may share the unmodified installer with others, as long as you include this license and do not charge for it.
+
+You may not modify, decompile, reverse engineer, resell, or sublicense this software, and you may not present it as your own work.
+
+The source code in this repository is published so it can be read. It is not licensed for copying, modifying, or redistributing, in whole or in part, beyond what this license allows for the installer.
+
+Third-party software
+
+This software includes the mpv media player library (libmpv-2.dll) and FFmpeg (ffmpeg.exe and ffprobe.exe). These are separate projects with their own licenses. See https://mpv.io and https://ffmpeg.org for details. The restrictions above apply only to Feather Player itself. Nothing in this license changes the terms that apply to mpv or FFmpeg, and you keep all the rights those licenses give you for those components. The included FFmpeg build is licensed under the GNU General Public License v3, and its source code is available at https://ffmpeg.org/download.html.
+
+Feather Player is also built with open-source Rust libraries (such as egui, eframe and winit), which are licensed under the MIT and/or Apache-2.0 licenses. Their copyright notices and license texts apply to those libraries and are available from each library's page on https://crates.io.
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
