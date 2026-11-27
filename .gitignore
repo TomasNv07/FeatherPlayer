@@ -7,3 +7,8 @@ Cargo.lock.bak
 *.mp4
 *.mkv
 .vscode/
+
+# local build tooling (owner 2026-11-28: one PC only, kept off GitHub; still on disk)
+/build_installer.bat
+/build_local.bat
+/setup/

@@ -2,6 +2,8 @@
 
 **Renamed 2026-11-28 (owner):** the GitHub repo is now `TomasNv07/FeatherPlayer` (was `FeatherPlayer-rs`; GitHub redirects the old URLs, incl. the API and release downloads; the name was only a redirect to the Python repo, which is `TomasNv07/FeatherPlayer-Py`). The crate/exe is `featherplayer` (`target\release\featherplayer.exe`; build_local.bat renames it to `FeatherPlayer.exe` as before). Data folder, settings, installer AppId and installed exe name are unchanged. Each PC's clone: `git remote set-url origin https://github.com/TomasNv07/FeatherPlayer.git` (the old URL keeps working through the redirect). The local folder may still be called `FeatherPlayer-rs`; that doesn't matter.
 
+**One PC only since 2026-11-28 (owner):** the second PC isn't used any more. `build_installer.bat`, `build_local.bat` and `setup\` (FeatherPlayer.iss, next_version.ps1, find_iscc.ps1, make_icon.ps1) are git-ignored and exist only on this PC (`C:\Users\nevan\Projects\FeatherPlayer-rs`); the rest of this file still describes them. Their last tracked versions are in git history (commit 5d109ff) if they're ever lost.
+
 Port of FeatherPlayer (`reference/FeatherPlayer.py`, ~11.8k lines, one `VideoPlayerApp` class, Windows-only, fully custom-drawn tkinter UI) to Rust. The owner is Tomas; he works on two Windows PCs and syncs through this git repo, so everything important must live in the repo (this file, commit messages), not in chat history.
 
 ## Context from the owner
