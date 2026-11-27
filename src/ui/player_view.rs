@@ -510,8 +510,11 @@ impl PlayerView {
         }
 
         // dark fade behind the controls so white reads on any picture
+        // controls + fade on the Middle layer, under the fullscreen clip list (Foreground);
+        // the fade is painted on the controls' own layer so it never covers them
+        let ctrl_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("fs_controls"));
         let fade = Rect::from_min_max(Pos2::new(video.left(), video.bottom() - band_h - 70.0), video.max);
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("fs_fade"))).with_clip_rect(video);
+        let painter = ctx.layer_painter(ctrl_layer).with_clip_rect(video);
         let mut mesh = egui::Mesh::default();
         let (clear, dark) = (Color32::TRANSPARENT, Color32::from_black_alpha(185));
         mesh.colored_vertex(fade.left_top(), clear);
@@ -525,7 +528,7 @@ impl PlayerView {
         if p.volume == 0.0 {
             self.muted = true;
         }
-        egui::Area::new(egui::Id::new("fs_controls")).fixed_pos(band.min).order(egui::Order::Foreground).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("fs_controls")).fixed_pos(band.min).order(egui::Order::Middle).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             ui.set_width(band.width());
             ui.set_height(band.height());
