@@ -241,6 +241,8 @@ impl FeatherApp {
         theme::apply(&cc.egui_ctx);
         let hwnd = window::hwnd_of(cc);
         window::apply_dark_frame(hwnd, theme::bg());
+        // winit has registered for raw mouse input by now; moving the mouse starved the redraws
+        window::stop_raw_mouse_input();
         let (restore_tx, restore_rx) = std::sync::mpsc::channel();
         window::start_restore_listener(restore_tx, cc.egui_ctx.clone());
         let prefs = Prefs::load();

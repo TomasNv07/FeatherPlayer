@@ -56,6 +56,18 @@ pub fn apply_dark_frame(hwnd: HWND, bg: egui::Color32) {
     set(34, colorref(bg)); // DWMWA_BORDER_COLOR
 }
 
+/// Stop the raw mouse input winit registers for (`DeviceEvent::MouseMotion`, which nothing
+/// here uses). A high polling-rate mouse sends thousands of WM_INPUT messages a second, and
+/// Windows only delivers WM_PAINT (= the next frame) when the queue is empty, so moving the
+/// mouse starved the redraws and the video stuttered, worse the faster it moved. Normal
+/// WM_MOUSEMOVE / button messages (what egui uses) are not affected. winit registers only
+/// once, at start-up, so this is called once after the window exists.
+pub fn stop_raw_mouse_input() {
+    use windows_sys::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_REMOVE};
+    let dev = RAWINPUTDEVICE { usUsagePage: 0x01, usUsage: 0x02, dwFlags: RIDEV_REMOVE, hwndTarget: std::ptr::null_mut() };
+    unsafe { RegisterRawInputDevices(&dev, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32) };
+}
+
 /// Fullscreen: square corners and no outline (Windows 11 rounds the window corners, which
 /// cut the video's corners off); back to `apply_dark_frame`'s look when leaving.
 pub fn set_fullscreen_frame(hwnd: HWND, fullscreen: bool, bg: egui::Color32) {
