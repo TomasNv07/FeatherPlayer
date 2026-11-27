@@ -110,7 +110,8 @@ const CLIPS_PANEL: &str = "clips";
 /// Python `SIDEBAR_MAX_W` and the pane minimums (left 400, sidebar 220).
 const SIDEBAR_MAX_W: f32 = 440.0;
 const LEFT_MIN: f32 = 400.0;
-const RIGHT_MIN: f32 = 220.0;
+/// Owner 2026-11-28: 300 (Python 220), narrower squeezed the pills and the card date row.
+const RIGHT_MIN: f32 = 300.0;
 
 /// Python `_sync_sash_16_9` / `_fit_video_16_9` state.
 struct Fit {
@@ -1825,7 +1826,7 @@ impl eframe::App for FeatherApp {
         if !fullscreen {
             // right: clip list (declared first so the header only spans the left side)
             let badges = Badges { audio: &self.tracks.badges };
-            let mut panel = egui::SidePanel::right(CLIPS_PANEL).resizable(true).default_width(300.0).width_range(220.0..=440.0);
+            let mut panel = egui::SidePanel::right(CLIPS_PANEL).resizable(true).default_width(300.0).width_range(RIGHT_MIN..=SIDEBAR_MAX_W);
             if let Some(w) = self.fit.sidebar_w.take() {
                 panel = panel.exact_width(w); // 16:9 fit: this frame only, then resizable again
             }

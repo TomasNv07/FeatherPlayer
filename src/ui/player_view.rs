@@ -539,38 +539,48 @@ impl PlayerView {
             }
             // buttons row
             let row = Rect::from_min_max(Pos2::new(inner.left(), bar_r.bottom() + 6.0), Pos2::new(inner.right(), band.bottom() - 12.0));
+            // left: time (+ speed when not 1x)
             let mut left = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
             left.spacing_mut().item_spacing = Vec2::ZERO;
-            if fs_btn(&mut left, 36.0, "skip-prev", 18.0).on_hover_text("Previous frame").clicked() {
+            left.label(egui::RichText::new(format!("{} / {}", fmt(pb.shown_pos), fmt(p.dur))).font(theme::font_ui()).color(FS_WHITE));
+            if p.speed != 1.0 {
+                left.add_space(12.0);
+                left.label(egui::RichText::new(format!("{}x", fmt_speed(p.speed))).font(theme::font_ui()).color(FS_WHITE));
+            }
+
+            // centre: frame back, play/pause, frame forward
+            let cw = 36.0 + 6.0 + 44.0 + 6.0 + 36.0;
+            let mid = Rect::from_center_size(Pos2::new(row.center().x, row.center().y), Vec2::new(cw, row.height()));
+            let mut centre = ui.new_child(egui::UiBuilder::new().max_rect(mid).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            centre.spacing_mut().item_spacing = Vec2::ZERO;
+            if fs_btn(&mut centre, 36.0, "skip-prev", 18.0).on_hover_text("Previous frame").clicked() {
                 p.frame_step(true);
             }
-            left.add_space(4.0);
-            if fs_btn(&mut left, 44.0, if p.playing() { "pause" } else { "play" }, 24.0).clicked() {
+            centre.add_space(6.0);
+            if fs_btn(&mut centre, 44.0, if p.playing() { "pause" } else { "play" }, 24.0).clicked() {
                 pb.toggle_play(p);
             }
-            left.add_space(4.0);
-            if fs_btn(&mut left, 36.0, "skip-next", 18.0).on_hover_text("Next frame").clicked() {
+            centre.add_space(6.0);
+            if fs_btn(&mut centre, 36.0, "skip-next", 18.0).on_hover_text("Next frame").clicked() {
                 p.frame_step(false);
             }
-            left.add_space(18.0);
-            if fs_btn(&mut left, 36.0, if self.muted { "mute" } else { "volume" }, 19.0).clicked() {
-                self.toggle_mute(p);
-            }
-            left.add_space(4.0);
-            if let Some(v) = crate::ui::trim_slider::fs_slider(&mut left, 120.0, p.volume, 100.0) {
-                self.set_volume(p, v);
-            }
-            left.add_space(16.0);
-            left.label(egui::RichText::new(format!("{} / {}", fmt(pb.shown_pos), fmt(p.dur))).font(theme::font_ui()).color(FS_WHITE));
 
+            // right: volume, then leave fullscreen at the edge
             let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
             right.spacing_mut().item_spacing = Vec2::ZERO;
             if fs_btn(&mut right, 36.0, "fullscreen-exit", 19.0).on_hover_text("Leave fullscreen (F / Esc)").clicked() {
                 toggle_fullscreen(ctx);
             }
-            if p.speed != 1.0 {
-                right.add_space(12.0);
-                right.label(egui::RichText::new(format!("{}x", fmt_speed(p.speed))).font(theme::font_ui()).color(FS_WHITE));
+            right.add_space(16.0);
+            // the slider is laid out left to right inside its own slot
+            let (slot, _) = right.allocate_exact_size(Vec2::new(120.0, row.height()), Sense::hover());
+            let mut sl = right.new_child(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            if let Some(v) = crate::ui::trim_slider::fs_slider(&mut sl, 120.0, p.volume, 100.0) {
+                self.set_volume(p, v);
+            }
+            right.add_space(4.0);
+            if fs_btn(&mut right, 36.0, if self.muted { "mute" } else { "volume" }, 19.0).clicked() {
+                self.toggle_mute(p);
             }
         });
         acts
