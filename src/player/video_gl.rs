@@ -24,11 +24,16 @@ pub struct VideoGl {
     /// Latest requested size and since when (resize debounce).
     want: (i32, i32),
     want_since: Option<Instant>,
+    /// The texture holds a rendered picture at its current size.
+    valid: bool,
 }
 
 impl VideoGl {
     fn ensure(&mut self, gl: &glow::Context, w: i32, h: i32) {
         unsafe {
+            if self.fbo.is_none() || (self.w, self.h) != (w, h) {
+                self.valid = false; // new / re-allocated texture: nothing in it yet
+            }
             if self.fbo.is_none() {
                 self.fbo = gl.create_framebuffer().ok();
                 self.tex = gl.create_texture().ok();
@@ -82,7 +87,9 @@ pub fn render_offscreen(core: &mpv::Core, vgl: &Mutex<VideoGl>, gl: &glow::Conte
     }
     let (rw, rh) = (st.w, st.h);
     if let Some(fbo) = st.fbo {
-        core.render_if_wanted(fbo.0.get() as i32, rw, rh);
+        if core.render_if_wanted(fbo.0.get() as i32, rw, rh) {
+            st.valid = true;
+        }
         unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
     }
 }
@@ -110,7 +117,16 @@ pub fn video_callback(core: Arc<mpv::Core>, vgl: Arc<Mutex<VideoGl>>, rect: Rect
             }
             let (rw, rh) = (st.w, st.h);
             let Some(fbo) = st.fbo else { return };
-            if core.render(fbo.0.get() as i32, rw, rh) {
+            // Only ask mpv to render when it has a new frame (or the texture is empty); every
+            // other egui frame (mouse moves, hover effects) just shows the picture already in
+            // the texture. Rendering on every egui frame made mpv wait for frame target times
+            // and threw its frame pacing off: the video stuttered whenever the mouse moved.
+            if st.valid {
+                core.render_if_wanted(fbo.0.get() as i32, rw, rh);
+            } else if core.render(fbo.0.get() as i32, rw, rh) {
+                st.valid = true;
+            }
+            if st.valid {
                 // same size: 1:1. While resizing: scale the old picture evenly and centre it
                 // (stretching it to the new rect distorted the video's aspect ratio)
                 let (dx, dy, dw, dh, filter) = if (rw, rh) == (w, h) {
