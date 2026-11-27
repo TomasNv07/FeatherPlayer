@@ -12,7 +12,13 @@ The source code in this repository is published so it can be read. It is not lic
 
 Third-party software
 
-This software includes the mpv media player library (libmpv-2.dll) and FFmpeg (ffmpeg.exe and ffprobe.exe). These are separate projects with their own licenses. See https://mpv.io and https://ffmpeg.org for details. The restrictions above apply only to Feather Player itself. Nothing in this license changes the terms that apply to mpv or FFmpeg, and you keep all the rights those licenses give you for those components. The included FFmpeg build is licensed under the GNU General Public License v3, and its source code is available at https://ffmpeg.org/download.html.
+This software includes the mpv media player library (libmpv-2.dll) and FFmpeg (ffmpeg.exe and ffprobe.exe). These are separate projects with their own licenses. See https://mpv.io and https://ffmpeg.org for details. The restrictions above apply only to Feather Player itself. Nothing in this license changes the terms that apply to mpv or FFmpeg, and you keep all the rights those licenses give you for those components.
+
+The included libmpv-2.dll is licensed under the GNU Lesser General Public License, version 2.1 or later. You may replace it with your own build of libmpv, and the restrictions above do not prevent the modification and reverse engineering of Feather Player that is needed to do that and to debug such changes, as that license allows.
+
+The included FFmpeg build is licensed under the GNU General Public License, version 3. Feather Player runs it as a separate program.
+
+The license texts and where to get the source code of these components are in the "licenses" folder of the installation.
 
 Feather Player is also built with open-source Rust libraries (such as egui, eframe and winit), which are licensed under the MIT and/or Apache-2.0 licenses. Their copyright notices and license texts apply to those libraries and are available from each library's page on https://crates.io.
 

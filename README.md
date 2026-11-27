@@ -66,9 +66,11 @@ The app loads `libmpv-2.dll` at runtime from the `FEATHER_LIBMPV` environment va
 
 Feather Player includes the following third-party software. Each is a separate project with its own license, and those licenses apply to those components.
 
-- [mpv](https://mpv.io) (`libmpv-2.dll`) is used for video playback and is included with the installer.
+- [mpv](https://mpv.io) (`libmpv-2.dll`) is used for video playback and is included with the installer. The included build is an LGPL build (without GPL parts) from [zhongfly/mpv-winbuild](https://github.com/zhongfly/mpv-winbuild) and is licensed under the GNU LGPL v2.1 or later. mpv's source code is available at <https://github.com/mpv-player/mpv>.
 - [FFmpeg](https://ffmpeg.org) (`ffmpeg.exe` and `ffprobe.exe`) is used for thumbnails and video processing and is included with the installer. The included build is from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and is licensed under the GNU GPL v3. FFmpeg's source code is available at <https://ffmpeg.org/download.html>. FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
 - [egui / eframe](https://github.com/emilk/egui), [winit](https://github.com/rust-windowing/winit) and other open-source Rust libraries (MIT / Apache-2.0) are used to build the app.
+
+The full license texts, the Rust libraries' notices and where to get the mpv and FFmpeg source code are installed with the app in its `licenses` folder.
 
 ## License
 
