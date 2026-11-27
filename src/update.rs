@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex};
 /// This build's version: set by build_installer.bat (FP_VERSION), else the newest git tag
 /// (see build.rs).
 pub const VERSION: &str = env!("FP_VERSION");
-const LATEST_API: &str = "https://api.github.com/repos/TomasNv07/FeatherPlayer-rs/releases/latest";
+/// (the repo was renamed from FeatherPlayer-rs on 2026-11-28; GitHub redirects the old name)
+const LATEST_API: &str = "https://api.github.com/repos/TomasNv07/FeatherPlayer/releases/latest";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Default, PartialEq, Debug)]

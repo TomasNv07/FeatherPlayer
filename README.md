@@ -1,4 +1,4 @@
-# FeatherPlayer-rs
+# FeatherPlayer
 
 Rust port of FeatherPlayer (Python/tkinter clip player built on mpv). Work in progress.
 
@@ -7,7 +7,7 @@ Right now this is the proof of concept: mpv renders inside an egui window, widge
 ## Build & run (Windows)
 
     cargo build --release
-    target\release\featherplayer-rs.exe "C:\path\to\clip.mkv"
+    target\release\featherplayer.exe "C:\path\to\clip.mkv"
 
 Start with no argument and drag a video onto the window, or use the Open... button.
 libmpv is loaded at runtime from: `FEATHER_LIBMPV` env var, next to the exe,

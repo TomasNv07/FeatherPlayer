@@ -1,4 +1,4 @@
-﻿//! FeatherPlayer-rs: Rust port of FeatherPlayer (see CLAUDE.md).
+﻿//! FeatherPlayer: Rust port of the Python FeatherPlayer (see CLAUDE.md).
 //!
 //! Modules:
 //!   app     - eframe app shell
@@ -83,7 +83,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "FeatherPlayer-rs",
+        "FeatherPlayer",
         options,
         Box::new(move |cc| Ok(Box::new(app::FeatherApp::new(cc, lib, file, minimized)))),
     )

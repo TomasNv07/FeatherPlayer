@@ -1018,7 +1018,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "featherplayer-rs"
+name = "featherplayer"
 version = "0.1.0"
 dependencies = [
  "chrono",

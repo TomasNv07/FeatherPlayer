@@ -907,7 +907,7 @@ mod tests {
     #[ignore]
     fn real_recycle_temp_file() {
         let f = std::env::temp_dir().join("featherplayer_recycle_test.txt");
-        std::fs::write(&f, b"test file from FeatherPlayer-rs tests, safe to delete").unwrap();
+        std::fs::write(&f, b"test file from FeatherPlayer tests, safe to delete").unwrap();
         let p = f.to_string_lossy().into_owned();
         assert!(can_recycle(&p), "temp dir should be on a fixed drive");
         assert!(recycle_file(&p));

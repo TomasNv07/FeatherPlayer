@@ -11,14 +11,14 @@ set "DIST=%~dp0dist\FeatherPlayer"
 
 where cargo >nul 2>nul || set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 
-echo Building featherplayer-rs (release)...
+echo Building featherplayer (release)...
 cargo build --release
 if errorlevel 1 goto :fail
 
 echo Copying files to %DIST% ...
 if exist "%DIST%" rmdir /s /q "%DIST%"
 mkdir "%DIST%" || goto :fail
-copy /y "target\release\featherplayer-rs.exe" "%DIST%\FeatherPlayer.exe" >nul || goto :fail
+copy /y "target\release\featherplayer.exe" "%DIST%\FeatherPlayer.exe" >nul || goto :fail
 
 if not exist "%DATA%\libmpv-2.dll" (
     echo ERROR: %DATA%\libmpv-2.dll not found - the app cannot play video without it.
