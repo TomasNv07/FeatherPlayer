@@ -39,6 +39,55 @@ pub fn hwnd_of(cc: &eframe::CreationContext<'_>) -> HWND {
     h
 }
 
+// ── Session end / Restart Manager ────────────────────────────────────────────
+
+static QUIT_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static QUIT_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Answer Windows' "please close" (WM_QUERYENDSESSION / WM_ENDSESSION). The installer's
+/// Restart Manager sends these when it is about to replace the files (in-app update), and
+/// Windows at shutdown / log-off. winit doesn't turn them into a close request, so the app
+/// used to ignore them; now `quit_requested` makes `FeatherApp` quit properly (prefs saved).
+pub fn watch_session_end(hwnd: HWND, ctx: egui::Context) {
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+    if hwnd.is_null() {
+        return;
+    }
+    let _ = QUIT_CTX.set(ctx);
+    unsafe { SetWindowSubclass(hwnd, Some(session_proc), 0xFEA7, 0) };
+}
+
+/// The installer / Windows asked the app to close.
+pub fn quit_requested() -> bool {
+    QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+unsafe extern "system" fn session_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize, _id: usize, _data: usize) -> isize {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WM_ENDSESSION, WM_QUERYENDSESSION};
+    match msg {
+        WM_QUERYENDSESSION => {
+            // "may we close?": yes, and start closing already (Restart Manager waits for us)
+            QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(c) = QUIT_CTX.get() {
+                c.request_repaint();
+            }
+            return 1;
+        }
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(c) = QUIT_CTX.get() {
+                    c.request_repaint();
+                }
+            }
+            return 0;
+        }
+        _ => {}
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
 // ── Fullscreen ───────────────────────────────────────────────────────────────
 
 static MAIN_HWND: std::sync::atomic::AtomicPtr<std::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());

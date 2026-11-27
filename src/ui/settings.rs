@@ -299,8 +299,8 @@ fn update_block(ui: &mut egui::Ui, info: &crate::update::Info, acts: &mut Vec<Se
                 let line = format!("Feather Player {} is out. You have {}.", info.latest, crate::update::VERSION);
                 ui.label(egui::RichText::new(line).font(theme::font_ui()).color(theme::text_primary()));
                 let (sub, col) = match &info.phase {
-                    Phase::Downloading => ("Downloading the update\u{2026}".to_owned(), theme::text_muted()),
-                    Phase::Ready(_) => ("Installing \u{2014} Feather Player restarts by itself.".to_owned(), theme::text_muted()),
+                    Phase::Downloading(..) => ("Downloading the update\u{2026}".to_owned(), theme::text_muted()),
+                    Phase::Ready(_) | Phase::Installing => ("Installing \u{2014} Feather Player restarts by itself.".to_owned(), theme::text_muted()),
                     Phase::Error(e) => (e.clone(), theme::ERROR),
                     _ => ("Installs in the background and restarts Feather Player. Your clips and settings stay.".to_owned(), theme::text_dim()),
                 };
@@ -311,7 +311,7 @@ fn update_block(ui: &mut egui::Ui, info: &crate::update::Info, acts: &mut Vec<Se
                 let (text, enabled) = match info.phase {
                     Phase::Available => ("Update now", true),
                     Phase::Error(_) => ("Try again", true),
-                    Phase::Downloading => ("Downloading\u{2026}", false),
+                    Phase::Downloading(..) => ("Downloading\u{2026}", false),
                     _ => ("Installing\u{2026}", false),
                 };
                 let (bg, hov) = if enabled { (theme::accent(), theme::mix(theme::accent(), Color32::WHITE, 0.15)) } else { (c("#2A2A4A"), c("#2A2A4A")) };

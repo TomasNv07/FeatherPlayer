@@ -20,6 +20,8 @@ pub const VERSION: &str = env!("FP_VERSION");
 /// (the repo was renamed from FeatherPlayer-rs on 2026-11-28; GitHub redirects the old name)
 const LATEST_API: &str = "https://api.github.com/repos/TomasNv07/FeatherPlayer/releases/latest";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// The installer finished without having to close this copy: the app should quit.
+pub static QUIT_AND_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub enum Phase {
@@ -27,9 +29,14 @@ pub enum Phase {
     #[default]
     None,
     Available,
-    Downloading,
-    /// Downloaded: the app starts the installer and quits.
+    /// Downloading: (bytes so far, total bytes; 0 = unknown).
+    Downloading(u64, u64),
+    /// Downloaded: the app starts the installer (`Updater::install`).
     Ready(PathBuf),
+    /// The installer runs; it asks the app to close (WM_ENDSESSION, see
+    /// `window::watch_session_end`) just before it replaces the files, then starts the new
+    /// version. The app stays open until then (owner 2026-11-28).
+    Installing,
     Error(String),
 }
 
@@ -37,6 +44,8 @@ pub enum Phase {
 pub struct Info {
     pub latest: String,
     url: String,
+    /// Installer size from GitHub (for the progress bar).
+    size: u64,
     pub phase: Phase,
 }
 
@@ -49,6 +58,10 @@ impl Info {
 
 pub struct Updater {
     st: Arc<Mutex<Info>>,
+    /// Set by "Cancel" while downloading.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The running installer (to notice when it ends without closing the app = failed).
+    installer: Mutex<Option<(std::process::Child, std::time::Instant)>>,
 }
 
 fn curl() -> Command {
@@ -72,15 +85,18 @@ fn is_newer(latest: &str, current: &str) -> bool {
     (0..n).map(|i| at(&a, i).cmp(&at(&b, i))).find(|o| o.is_ne()) == Some(std::cmp::Ordering::Greater)
 }
 
-/// (tag, installer URL) of the latest release, from GitHub's JSON.
-fn latest_release(json: &str) -> Option<(String, String)> {
+/// (tag, installer URL, installer size) of the latest release, from GitHub's JSON.
+fn latest_release(json: &str) -> Option<(String, String, u64)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let tag = v.get("tag_name")?.as_str()?.to_owned();
-    let url = v.get("assets")?.as_array()?.iter().find_map(|a| {
+    let (url, size) = v.get("assets")?.as_array()?.iter().find_map(|a| {
         let name = a.get("name")?.as_str()?;
-        (name.starts_with("FeatherPlayer_Setup_") && name.to_lowercase().ends_with(".exe")).then(|| a.get("browser_download_url")?.as_str().map(str::to_owned))?
+        if !(name.starts_with("FeatherPlayer_Setup_") && name.to_lowercase().ends_with(".exe")) {
+            return None;
+        }
+        Some((a.get("browser_download_url")?.as_str()?.to_owned(), a.get("size").and_then(|s| s.as_u64()).unwrap_or(0)))
     })?;
-    Some((tag, url))
+    Some((tag, url, size))
 }
 
 impl Updater {
@@ -93,56 +109,112 @@ impl Updater {
             if !out.status.success() {
                 return; // offline / rate limited: just no update shown
             }
-            let Some((tag, url)) = latest_release(&String::from_utf8_lossy(&out.stdout)) else { return };
+            let Some((tag, url, size)) = latest_release(&String::from_utf8_lossy(&out.stdout)) else { return };
             if is_newer(&tag, VERSION) {
-                *s.lock().unwrap() = Info { latest: tag.trim_start_matches(['v', 'V']).to_owned(), url, phase: Phase::Available };
+                *s.lock().unwrap() = Info { latest: tag.trim_start_matches(['v', 'V']).to_owned(), url, size, phase: Phase::Available };
                 ctx.request_repaint();
             }
         });
-        Updater { st }
+        Updater { st, cancel: Arc::default(), installer: Mutex::new(None) }
     }
 
     pub fn info(&self) -> Info {
         self.st.lock().unwrap().clone()
     }
 
-    /// "Update now": download the installer into %TEMP% (background thread).
+    /// "Update now": download the installer into %TEMP% (background thread), with progress
+    /// from the file's size against GitHub's asset size.
     pub fn download(&self, ctx: &egui::Context) {
-        let (url, ver) = {
+        use std::sync::atomic::Ordering;
+        let (url, ver, total) = {
             let mut i = self.st.lock().unwrap();
             if !matches!(i.phase, Phase::Available | Phase::Error(_)) {
                 return;
             }
-            i.phase = Phase::Downloading;
-            (i.url.clone(), i.latest.clone())
+            i.phase = Phase::Downloading(0, i.size);
+            (i.url.clone(), i.latest.clone(), i.size)
         };
-        let s = self.st.clone();
-        let ctx = ctx.clone();
+        self.cancel.store(false, Ordering::SeqCst);
+        let (s, cancel, ctx) = (self.st.clone(), self.cancel.clone(), ctx.clone());
         std::thread::spawn(move || {
             let dest = std::env::temp_dir().join(format!("FeatherPlayer_Setup_{ver}.exe"));
             let _ = std::fs::remove_file(&dest);
-            let ok = curl().args(["--max-time", "600", "-o"]).arg(&dest).arg(&url).stdout(Stdio::null()).status().is_ok_and(|st| st.success());
-            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-            s.lock().unwrap().phase = if ok && size > 1_000_000 {
-                Phase::Ready(dest)
-            } else {
+            let fail = |msg: &str| {
                 let _ = std::fs::remove_file(&dest);
-                Phase::Error("Download failed. Check the internet connection and try again.".into())
+                s.lock().unwrap().phase = Phase::Error(msg.to_owned());
+                ctx.request_repaint();
             };
-            ctx.request_repaint();
+            let Ok(mut child) = curl().args(["--max-time", "900", "-o"]).arg(&dest).arg(&url).stdout(Stdio::null()).spawn() else {
+                return fail("Could not start the download.");
+            };
+            let ok = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&dest);
+                    s.lock().unwrap().phase = Phase::Available;
+                    ctx.request_repaint();
+                    return;
+                }
+                if let Ok(Some(st)) = child.try_wait() {
+                    break st.success();
+                }
+                let got = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                s.lock().unwrap().phase = Phase::Downloading(got, total);
+                ctx.request_repaint();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            if ok && size > 1_000_000 && (total == 0 || size == total) {
+                s.lock().unwrap().phase = Phase::Ready(dest);
+                ctx.request_repaint();
+            } else {
+                fail("Download failed. Check the internet connection and try again.");
+            }
         });
     }
 
-    /// The download didn't start the installer (the app reports this).
-    pub fn set_error(&self, msg: &str) {
-        self.st.lock().unwrap().phase = Phase::Error(msg.to_owned());
+    /// "Cancel" in the update window (only while downloading).
+    pub fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     }
-}
 
-/// Run the downloaded installer silently; it closes this app if needed and starts the new
-/// version when done.
-pub fn run_installer(path: &Path) -> bool {
-    Command::new(path).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]).spawn().is_ok()
+    /// Start the downloaded installer silently. The app keeps running: the installer asks it
+    /// to close (Restart Manager -> WM_QUERYENDSESSION / WM_ENDSESSION) right before it
+    /// replaces the files, and starts the new version when done.
+    pub fn install(&self, path: &Path) {
+        match Command::new(path).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]).spawn() {
+            Ok(child) => {
+                *self.installer.lock().unwrap() = Some((child, std::time::Instant::now()));
+                self.st.lock().unwrap().phase = Phase::Installing;
+            }
+            Err(_) => self.st.lock().unwrap().phase = Phase::Error("Could not start the installer. Try again.".into()),
+        }
+    }
+
+    /// While installing: the installer ended but this app is still running, so it did not get
+    /// to replace the files.
+    pub fn check_installer(&self) {
+        let mut g = self.installer.lock().unwrap();
+        let Some((child, _since)) = g.as_mut() else { return };
+        if let Ok(Some(st)) = child.try_wait() {
+            *g = None;
+            if st.success() {
+                // installed, but this copy runs from somewhere else (e.g. a dev build), so the
+                // installer didn't have to close it: quit, and open the installed version
+                // a moment later (it would hand over to us while we still run)
+                QUIT_AND_OPEN.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+                    let exe = PathBuf::from(dir).join(r"Programs\Feather Player\FeatherPlayer.exe");
+                    if exe.exists() {
+                        let _ = Command::new("cmd").creation_flags(CREATE_NO_WINDOW).args(["/c", "ping -n 3 127.0.0.1 >nul & start \"\""]).arg(&exe).spawn();
+                    }
+                }
+            } else {
+                self.st.lock().unwrap().phase = Phase::Error(format!("The update could not be installed (code {}). Try again.", st.code().unwrap_or(-1)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +233,7 @@ mod tests {
     #[test]
     fn picks_the_installer_asset() {
         let json = r#"{"tag_name":"v1.0.9","assets":[{"name":"notes.txt","browser_download_url":"x"},{"name":"FeatherPlayer_Setup_1.0.9.exe","browser_download_url":"https://example/FeatherPlayer_Setup_1.0.9.exe"}]}"#;
-        assert_eq!(latest_release(json), Some(("v1.0.9".into(), "https://example/FeatherPlayer_Setup_1.0.9.exe".into())));
+        assert_eq!(latest_release(json), Some(("v1.0.9".into(), "https://example/FeatherPlayer_Setup_1.0.9.exe".into(), 0)));
         assert_eq!(latest_release(r#"{"tag_name":"v1","assets":[]}"#), None);
     }
 

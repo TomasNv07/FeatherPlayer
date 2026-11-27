@@ -83,6 +83,8 @@ pub struct FeatherApp {
     lan: crate::lan::Lan,
     /// Update check (once at start) + download.
     updater: crate::update::Updater,
+    /// The update window (progress bar) is open.
+    update_popup: bool,
     settings: SettingsPage,
     settings_open: bool,
     settings_seen: bool,
@@ -245,6 +247,8 @@ impl FeatherApp {
         window::apply_dark_frame(hwnd, theme::bg());
         // winit has registered for raw mouse input by now; moving the mouse starved the redraws
         window::stop_raw_mouse_input();
+        // quit properly when the updater's installer (or Windows shutdown) asks us to close
+        window::watch_session_end(hwnd, cc.egui_ctx.clone());
         let (restore_tx, restore_rx) = std::sync::mpsc::channel();
         window::start_restore_listener(restore_tx, cc.egui_ctx.clone());
         let prefs = Prefs::load();
@@ -300,6 +304,7 @@ impl FeatherApp {
             cloud: Cloud::new(cc.egui_ctx.clone()),
             lan: crate::lan::Lan::new(cc.egui_ctx.clone()),
             updater: crate::update::Updater::start(cc.egui_ctx.clone()),
+            update_popup: false,
             settings: SettingsPage::default(),
             settings_open: false,
             settings_seen: false,
@@ -477,6 +482,10 @@ impl FeatherApp {
             self.on_close(ctx);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
+            self.real_quit(ctx);
+        }
+        // the updater's installer (Restart Manager) or Windows shutdown asked us to close
+        if (window::quit_requested() || crate::update::QUIT_AND_OPEN.load(std::sync::atomic::Ordering::SeqCst)) && !self.win.quitting {
             self.real_quit(ctx);
         }
         if self.win.hidden {
@@ -1449,7 +1458,10 @@ impl FeatherApp {
 
     fn settings_action(&mut self, ctx: &egui::Context, a: SettingsAction) {
         match a {
-            SettingsAction::Update => self.updater.download(ctx),
+            SettingsAction::Update => {
+                self.update_popup = true;
+                self.updater.download(ctx);
+            }
             SettingsAction::Close => {
                 self.settings_open = false;
                 if std::mem::take(&mut self.thumbs_dirty) {
@@ -1808,14 +1820,28 @@ impl eframe::App for FeatherApp {
         ctx.request_repaint_after(Duration::from_secs(5));
         self.folder_watch_tick(ctx);
 
-        // update downloaded: start the silent installer and quit (it starts the new version)
-        let update = self.updater.info();
-        if let crate::update::Phase::Ready(path) = &update.phase {
-            if crate::update::run_installer(path) {
-                self.real_quit(ctx);
-                return;
+        // in-app update: downloaded -> start the silent installer but stay open; the installer
+        // asks us to close (window::quit_requested) right before it replaces the files
+        use crate::update::Phase;
+        let mut update = self.updater.info();
+        if let Phase::Ready(path) = &update.phase {
+            self.updater.install(path);
+            update = self.updater.info();
+        }
+        if update.phase == Phase::Installing {
+            self.updater.check_installer();
+            ctx.request_repaint_after(Duration::from_millis(300));
+        }
+        if self.update_popup {
+            match crate::ui::dialogs::update_window(ctx, &update) {
+                Some(crate::ui::dialogs::UpdateAct::Cancel) => self.updater.cancel(),
+                Some(crate::ui::dialogs::UpdateAct::Retry) => self.updater.download(ctx),
+                Some(crate::ui::dialogs::UpdateAct::Close) => self.update_popup = false,
+                None => {}
             }
-            self.updater.set_error("Could not start the installer. Try again.");
+            if update.phase == Phase::Available {
+                self.update_popup = false; // cancelled
+            }
         }
         let update_badge = update.available();
 

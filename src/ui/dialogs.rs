@@ -481,6 +481,109 @@ impl ConfirmDialog {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Update window (owner 2026-11-28): download progress, then "installing" until the installer
+// closes the app
+// ---------------------------------------------------------------------------------------------
+
+pub enum UpdateAct {
+    Cancel,
+    Retry,
+    Close,
+}
+
+pub fn update_window(ctx: &egui::Context, info: &crate::update::Info) -> Option<UpdateAct> {
+    use crate::update::Phase;
+    let mut act = None;
+    let frame = egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.0_f32, theme::border())).corner_radius(10).inner_margin(egui::Margin::ZERO);
+    egui::Modal::new(egui::Id::new("update_window")).frame(frame).show(ctx, |ui| {
+        let w = 400.0;
+        ui.set_max_width(w);
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        // title bar like the other dialogs: BG + accent line
+        let (bar, _) = ui.allocate_exact_size(Vec2::new(w, 37.0), egui::Sense::hover());
+        ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 }, theme::bg());
+        ui.painter().text(bar.left_center() + Vec2::new(16.0, 0.0), egui::Align2::LEFT_CENTER, "Updating Feather Player", theme::font_bold(), theme::text_primary());
+        let (line, _) = ui.allocate_exact_size(Vec2::new(w, 2.0), egui::Sense::hover());
+        ui.painter().rect_filled(line, 0.0, theme::accent());
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 18)).show(ui, |ui| {
+            ui.set_width(w - 40.0);
+            let (head, frac, detail, detail_col): (String, Option<f32>, String, egui::Color32) = match &info.phase {
+                Phase::Downloading(got, total) => {
+                    let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
+                    let f = if *total > 0 { (*got as f32 / *total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                    let d = if *total > 0 { format!("{:.0} %   {:.1} / {:.1} MB", f * 100.0, mb(*got), mb(*total)) } else { format!("{:.1} MB", mb(*got)) };
+                    (format!("Downloading version {}\u{2026}", info.latest), Some(f), d, theme::text_muted())
+                }
+                Phase::Ready(_) | Phase::Installing => (
+                    format!("Installing version {}\u{2026}", info.latest),
+                    None,
+                    "Feather Player closes and the new version opens by itself in a moment.".to_owned(),
+                    theme::text_muted(),
+                ),
+                Phase::Error(e) => ("The update didn't work".to_owned(), Some(0.0), e.clone(), theme::ERROR),
+                _ => (String::new(), Some(0.0), String::new(), theme::text_muted()),
+            };
+            ui.label(egui::RichText::new(head).font(theme::font_ui()).color(theme::text_primary()));
+            ui.add_space(12.0);
+            // progress bar (None = installing: an accent block sliding back and forth)
+            let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), egui::Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(r, 5.0, theme::bar_track());
+            match frac {
+                Some(f) if f > 0.0 => {
+                    let fill = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + r.width() * f, r.bottom()));
+                    p.rect_filled(fill, 5.0, theme::accent());
+                }
+                Some(_) => {}
+                None => {
+                    let t = ui.input(|i| i.time) as f32;
+                    let seg = r.width() * 0.3;
+                    let x = r.left() + (r.width() - seg) * (0.5 + 0.5 * (t * 2.2).sin());
+                    p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, r.top()), egui::pos2(x + seg, r.bottom())), 5.0, theme::accent());
+                    ui.ctx().request_repaint();
+                }
+            }
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(detail).font(theme::font_tiny()).color(detail_col)).wrap());
+        });
+        // buttons
+        let buttons: &[(&str, u8)] = match info.phase {
+            Phase::Downloading(..) => &[("Cancel", 0)],
+            Phase::Error(_) => &[("Close", 2), ("Try again", 1)],
+            _ => &[],
+        };
+        if !buttons.is_empty() {
+            let (d, _) = ui.allocate_exact_size(Vec2::new(w, 1.0), egui::Sense::hover());
+            ui.painter().rect_filled(d, 0.0, theme::divider());
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+                ui.set_width(w - 32.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for (i, (text, id)) in buttons.iter().rev().enumerate() {
+                        if i > 0 {
+                            ui.add_space(8.0);
+                        }
+                        let accent = *id == 1;
+                        let (fg, bg, hov) = if accent {
+                            (theme::accent_fg(), theme::accent(), theme::mix(theme::accent(), egui::Color32::WHITE, 0.15))
+                        } else {
+                            (theme::text_primary(), c("#242444"), c("#2A2A4A"))
+                        };
+                        if rounded_button(ui, text, fg, bg, hov, if accent { theme::font_bold() } else { theme::font_ui() }, 16.0, 7.0).clicked() {
+                            act = Some(match id {
+                                0 => UpdateAct::Cancel,
+                                1 => UpdateAct::Retry,
+                                _ => UpdateAct::Close,
+                            });
+                        }
+                    }
+                });
+            });
+        }
+    });
+    act
+}
+
+// ---------------------------------------------------------------------------------------------
 // Share (Python `_open_share_dialog`)
 // ---------------------------------------------------------------------------------------------
 
