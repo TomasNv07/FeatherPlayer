@@ -56,6 +56,23 @@ pub fn apply_dark_frame(hwnd: HWND, bg: egui::Color32) {
     set(34, colorref(bg)); // DWMWA_BORDER_COLOR
 }
 
+/// Fullscreen: square corners and no outline (Windows 11 rounds the window corners, which
+/// cut the video's corners off); back to `apply_dark_frame`'s look when leaving.
+pub fn set_fullscreen_frame(hwnd: HWND, fullscreen: bool, bg: egui::Color32) {
+    if hwnd.is_null() {
+        return;
+    }
+    if !fullscreen {
+        apply_dark_frame(hwnd, bg);
+        return;
+    }
+    let set = |attr: u32, v: u32| unsafe {
+        DwmSetWindowAttribute(hwnd, attr, &v as *const u32 as *const _, 4);
+    };
+    set(33, 1); // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND
+    set(34, 0xFFFF_FFFE); // DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE
+}
+
 /// (x, y, w, h) of the window's outer rect in screen pixels.
 pub fn window_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };

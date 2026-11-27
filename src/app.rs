@@ -47,6 +47,8 @@ pub struct FeatherApp {
     track_cache: HashMap<String, Vec<crate::player::audio::Track>>,
     /// Video area size in pixels (off-screen renders use it, so a swap needs no re-allocate).
     video_px: (i32, i32),
+    /// Last frame's fullscreen state (square window corners while fullscreen).
+    was_fullscreen: bool,
     /// `track_cache` has new entries to save (at most every 2 s).
     tracks_dirty: Option<Instant>,
     pb: Playback,
@@ -240,8 +242,9 @@ impl FeatherApp {
         window::start_restore_listener(restore_tx, cc.egui_ctx.clone());
         let prefs = Prefs::load();
         let st = prefs::read_settings();
-        let step = st.get_i64("see_more_step", 50);
-        let step = SEE_MORE_STEPS.iter().copied().find(|s| *s as i64 == step).unwrap_or(50);
+        // default 100 (owner's change 2026-11-27; Python 50)
+        let step = st.get_i64("see_more_step", 100);
+        let step = SEE_MORE_STEPS.iter().copied().find(|s| *s as i64 == step).unwrap_or(100);
         let clip_speed = st
             .get("clip_speeds")
             .and_then(|v| v.as_object())
@@ -263,6 +266,7 @@ impl FeatherApp {
             hover: None,
             track_cache: load_track_cache(),
             video_px: (1280, 720),
+            was_fullscreen: false,
             tracks_dirty: None,
             pb: Playback::new(st.get_bool("loop_clip", false)),
             lib: Library::new(step),
@@ -1531,7 +1535,6 @@ impl FeatherApp {
                     self.view.close_audio_menu();
                 }
             }
-            SettingsAction::SteelFirst(on) => self.tracks.set_steel_first(on),
             SettingsAction::DefaultTrack(n) => self.tracks.default_tick(n),
             SettingsAction::DefaultVol(n, v, fin) => {
                 if let (Some(items), Ok(p)) = (self.tracks.default_vol(n, v, fin), &mut self.player) {
@@ -1851,6 +1854,13 @@ impl eframe::App for FeatherApp {
         }
         let p = self.player.as_mut().unwrap();
         let video = self.view.video(ctx, p, &mut self.pb);
+        if fullscreen {
+            view_acts = self.view.fullscreen_overlay(ctx, p, &mut self.pb, video);
+        }
+        if self.was_fullscreen != fullscreen {
+            self.was_fullscreen = fullscreen;
+            window::set_fullscreen_frame(self.win.hwnd, fullscreen, theme::bg());
+        }
         if video.width() > 16.0 && video.height() > 16.0 {
             let ppp = ctx.pixels_per_point();
             self.video_px = ((video.width() * ppp).round() as i32, (video.height() * ppp).round() as i32);
@@ -1868,12 +1878,6 @@ impl eframe::App for FeatherApp {
         for a in grid_acts {
             match a {
                 GridAction::Play(path) => self.play(path),
-                GridAction::ToggleLike(path) => {
-                    if !self.prefs.liked.remove(&path) {
-                        self.prefs.liked.insert(path);
-                    }
-                    self.prefs.save();
-                }
                 GridAction::ListChanged => self.load_thumbs(None),
                 GridAction::SelectGame(key) => {
                     self.prefs.game_filter = key;

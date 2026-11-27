@@ -1,7 +1,7 @@
 //! Audio tracks editor (Python `_at_*`): which of a clip's audio tracks play and how loud.
 //! Defaults (settings `default_audio_tracks` / `default_audio_volumes`), per-clip choices
-//! (`clip_audio_tracks` / `clip_audio_volumes`), SteelSeries Game+Mic clips, the
-//! `audio_tracks_btn` and `steelseries_first_track_only` settings. Track numbers are 1-based.
+//! (`clip_audio_tracks` / `clip_audio_volumes`), SteelSeries Game+Mic clips (always
+//! both by default), the `audio_tracks_btn` setting. Track numbers are 1-based.
 
 use crate::player::audio::Track;
 use crate::prefs;
@@ -28,7 +28,6 @@ pub struct AudioSnap {
 pub struct AudioTracks {
     /// Audio tracks button + default rows shown (settings `audio_tracks_btn`).
     pub enabled: bool,
-    pub steel_first_only: bool,
     /// Default tracks (Python `_at_defaults`, sorted, at least one).
     pub defaults: Vec<usize>,
     /// Default volume per track number; 1.0 is left out.
@@ -103,7 +102,6 @@ impl AudioTracks {
         let clip_sel = st.get("clip_audio_tracks").and_then(|v| v.as_object()).map(|m| m.iter().map(|(p, v)| (p.clone(), clean(Some(v)))).collect()).unwrap_or_default();
         let mut a = AudioTracks {
             enabled: get_bool("audio_tracks_btn", true),
-            steel_first_only: get_bool("steelseries_first_track_only", false),
             defaults: clean(st.get("default_audio_tracks")),
             def_vol,
             clip_sel,
@@ -200,11 +198,9 @@ impl AudioTracks {
         }
         let has = |h: &str| tracks.iter().any(|t| t.handler == h);
         let steel_clip = has("Game") && has("Mic");
-        if steel_clip && self.steel_first_only {
-            // SteelSeries clips start on their first track only (no mix, no black screen);
-            // the Mic can still be ticked for one clip with the button
-            self.steel = Some([1].into());
-        } else if steel_clip {
+        // SteelSeries clips always start on Game + Mic (owner 2026-11-27: Python's "first track
+        // only" setting is gone); each can still be changed in the audio tracks menu
+        if steel_clip {
             self.steel = Some(tracks.iter().enumerate().filter(|(_, t)| t.handler == "Game" || t.handler == "Mic").map(|(i, _)| i + 1).collect());
         } else {
             self.steel = None;
@@ -317,12 +313,6 @@ impl AudioTracks {
         prefs::save_setting("audio_tracks_btn", Value::Bool(on));
     }
 
-    /// Python `_on_steel_first_toggle`.
-    pub fn set_steel_first(&mut self, on: bool) {
-        self.steel_first_only = on;
-        prefs::save_setting("steelseries_first_track_only", Value::Bool(on));
-    }
-
     /// Python `_on_at_default_tick` (at least one default track).
     pub fn default_tick(&mut self, n: usize) {
         let mut cur: BTreeSet<usize> = self.defaults.iter().copied().collect();
@@ -430,8 +420,6 @@ mod tests {
         let items = a.on_tracks(Some("c"), &[t(1, "Game"), t(2, "Mic")]).unwrap();
         assert_eq!(items, vec![(1, 1.0), (2, 1.0)]);
         assert!(!a.changed());
-        a.steel_first_only = true;
-        assert_eq!(a.on_tracks(Some("d"), &[t(1, "Game"), t(2, "Mic")]), None);
     }
 
     #[test]

@@ -117,6 +117,15 @@ impl TrimBar {
 
     /// `dur` = clip length in seconds (sets the minimum trim gap).
     pub fn show(&mut self, ui: &mut egui::Ui, width: f32, dur: f64) -> Vec<BarEvent> {
+        self.show_with(ui, width, dur, false)
+    }
+
+    /// The fullscreen look (thin white line, round white knob); same input rules as `show`.
+    pub fn show_fullscreen(&mut self, ui: &mut egui::Ui, width: f32, dur: f64) -> Vec<BarEvent> {
+        self.show_with(ui, width, dur, true)
+    }
+
+    fn show_with(&mut self, ui: &mut egui::Ui, width: f32, dur: f64, fs: bool) -> Vec<BarEvent> {
         let h = 28.0;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click_and_drag());
         let g = Geo { rect, pad: HANDLE_R + 2.0 };
@@ -200,8 +209,47 @@ impl TrimBar {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
 
-        self.paint(ui, &g);
+        if fs {
+            self.paint_fullscreen(ui, &g, resp.hovered() || self.is_dragging());
+        } else {
+            self.paint(ui, &g);
+        }
         ev
+    }
+
+    /// Fullscreen bar: a thin translucent white line that thickens on hover, white played
+    /// part, round white knob; trim brackets in white.
+    fn paint_fullscreen(&self, ui: &egui::Ui, g: &Geo, hot: bool) {
+        let p = ui.painter();
+        let r = g.rect;
+        let th = if hot { 3.0 } else { 2.0 };
+        let cy = r.center().y;
+        let track = Rect::from_min_max(Pos2::new(r.left() + g.pad, cy - th), Pos2::new(r.right() - g.pad, cy + th));
+        let white = Color32::from_rgb(0xf4, 0xf4, 0xf4);
+        p.rect_filled(track, th, Color32::from_white_alpha(70));
+        let mut hx = g.val_to_x(self.value);
+        if !self.trim_visible {
+            pill_part(p, track, track.left(), hx, white);
+        } else {
+            let sx = g.val_to_x(self.trim_start);
+            let ex = g.val_to_x(self.trim_end);
+            let dim = Color32::from_black_alpha(150);
+            pill_part(p, track, track.left(), sx, dim);
+            pill_part(p, track, ex, track.right(), dim);
+            hx = hx.clamp(sx, ex.max(sx));
+            if hx > sx {
+                p.rect_filled(Rect::from_min_max(Pos2::new(sx, cy - th), Pos2::new(hx, cy + th)), 0.0, white);
+            }
+            let (y0, y1, fl) = (cy - 9.0, cy + 9.0, 5.0);
+            for (bx, d) in [(sx, 1.0_f32), (ex, -1.0)] {
+                p.rect_filled(Rect::from_min_max(Pos2::new(bx - 1.0, y0), Pos2::new(bx + 1.0, y1)), 0.0, white);
+                let (a, b) = (bx - 1.0, bx + d * fl);
+                let (fx0, fx1) = (a.min(b), a.max(b) + 1.0);
+                p.rect_filled(Rect::from_min_max(Pos2::new(fx0, y0), Pos2::new(fx1, y0 + 2.0)), 0.0, white);
+                p.rect_filled(Rect::from_min_max(Pos2::new(fx0, y1 - 2.0), Pos2::new(fx1, y1)), 0.0, white);
+            }
+        }
+        p.circle_filled(Pos2::new(hx, cy), if hot { 7.0 } else { 5.5 }, white);
     }
 
     fn paint(&self, ui: &egui::Ui, g: &Geo) {
@@ -260,6 +308,34 @@ impl TrimBar {
 fn playhead(p: &egui::Painter, x: f32, y0: f32, y1: f32) {
     let hw = LINE_W / 2.0;
     p.rect_filled(Rect::from_min_max(Pos2::new(x - hw, y0 - hw), Pos2::new(x + hw, y1 + hw)), CornerRadius::same(hw.round() as u8), theme::accent());
+}
+
+/// The fullscreen volume bar: like the seek bar there (thin white line, round knob).
+pub fn fs_slider(ui: &mut egui::Ui, width: f32, value: f64, max: f64) -> Option<f64> {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::click_and_drag());
+    let pad = HANDLE_R + 2.0;
+    let w = (rect.width() - 2.0 * pad).max(1.0);
+    let mut out = None;
+    if resp.is_pointer_button_down_on() || resp.drag_stopped() || resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            out = Some(((p.x - rect.left() - pad) / w).clamp(0.0, 1.0) as f64 * max);
+        }
+    }
+    let v = out.unwrap_or(value);
+    let hot = resp.hovered() || resp.is_pointer_button_down_on();
+    let p = ui.painter();
+    let th = if hot { 3.0 } else { 2.0 };
+    let cy = rect.center().y;
+    let track = Rect::from_min_max(Pos2::new(rect.left() + pad, cy - th), Pos2::new(rect.right() - pad, cy + th));
+    let white = Color32::from_rgb(0xf4, 0xf4, 0xf4);
+    p.rect_filled(track, th, Color32::from_white_alpha(70));
+    let hx = rect.left() + pad + (v / max) as f32 * w;
+    pill_part(p, track, track.left(), hx, white);
+    p.circle_filled(Pos2::new(hx, cy), if hot { 6.5 } else { 5.0 }, white);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    out
 }
 
 /// Python `SlimSlider` (volume): 22px tall, 12px thick track, white fill, accent handle.

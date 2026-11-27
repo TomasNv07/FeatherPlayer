@@ -32,7 +32,6 @@ pub enum SettingsAction {
     CloseToTray(bool),
     StartWithWindows(bool),
     AudioEnabled(bool),
-    SteelFirst(bool),
     DefaultTrack(usize),
     /// Default volume of track n: (value, slider released).
     DefaultVol(usize, f64, bool),
@@ -468,6 +467,10 @@ impl SettingsPage {
                                     acts.push(SettingsAction::StarCopy(!v.star_copy));
                                 }
                             });
+                            // owner 2026-11-27: the rows under a sync toggle only show while it is on
+                            if !v.star_copy {
+                                return;
+                            }
                             divider(ui);
                             let desc = path_text(ui, v.star_folder);
                             row(ui, "Destination folder", &desc, |ui| {
@@ -486,6 +489,10 @@ impl SettingsPage {
                                     acts.push(SettingsAction::CloudToggle(!cloud.enabled()));
                                 }
                             });
+                            if !cloud.enabled() {
+                                self.games_popup = None;
+                                return;
+                            }
                             divider(ui);
                             let desc = path_text(ui, &cloud.folder);
                             row(ui, "Cloud folder", &desc, |ui| {
@@ -588,12 +595,6 @@ impl SettingsPage {
                                     acts.push(SettingsAction::AudioEnabled(!v.audio.enabled));
                                 }
                             });
-                            divider(ui);
-                            row(ui, "SteelSeries GG Moments: first track only", "SteelSeries clips start with only the first audio track (no Game + Mic mix), which avoids the black screen. Turn the Mic on for a single clip with the audio tracks button under the player", |ui| {
-                                if toggle(ui, v.audio.steel_first_only) {
-                                    acts.push(SettingsAction::SteelFirst(!v.audio.steel_first_only));
-                                }
-                            });
                             // everything below is hidden together with the audio tracks button
                             if v.audio.enabled {
                                 divider(ui);
@@ -692,6 +693,7 @@ impl SettingsPage {
                             ("\u{2190}", "Newer clip", "Jump to the next newer clip in the current filter"),
                             ("\u{2192}", "Older clip", "Jump to the next older clip in the current filter"),
                             ("M", "Mute / unmute", "Mute or unmute the volume"),
+                            ("F", "Fullscreen", "Enter or leave fullscreen (Esc also leaves it)"),
                             ("Esc", "Close settings or a popup", "Also closes the theme and cloud game lists"),
                             ("Ctrl + Q", "Quit completely", "Quits even when the close button hides to the tray"),
                         ]);

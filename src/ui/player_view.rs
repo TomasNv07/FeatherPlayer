@@ -57,6 +57,28 @@ pub struct PlayerView {
     /// Python click watcher state (`st["last"]`, `st["click_t"]`).
     last_click: Option<Instant>,
     click_t: Option<Instant>,
+    /// Fullscreen overlay: last pointer move / press, and where the pointer was.
+    fs_move: Option<Instant>,
+    fs_ptr: Option<Pos2>,
+}
+
+/// Fullscreen controls hide this long after the mouse stops moving (owner, 2026-11-27).
+const FS_HIDE: Duration = Duration::from_millis(500);
+const FS_WHITE: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf4);
+
+/// Fullscreen icon button: white icon, translucent white circle on hover.
+fn fs_btn(ui: &mut egui::Ui, size: f32, icon: &'static str, icon_size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if resp.is_pointer_button_down_on() {
+        ui.painter().circle_filled(rect.center(), size / 2.0, Color32::from_white_alpha(46));
+    } else if resp.hovered() {
+        ui.painter().circle_filled(rect.center(), size / 2.0, Color32::from_white_alpha(28));
+    }
+    icons::paint(ui, rect.center(), icon, icon_size, FS_WHITE, false, 1.9);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
 }
 
 fn toggle_fullscreen(ctx: &egui::Context) {
@@ -451,6 +473,106 @@ impl PlayerView {
                 }
             }
         }
+        acts
+    }
+
+    /// Fullscreen controls over the bottom of the video (owner's design 2026-11-27): seek
+    /// bar, frame step + play/pause, volume, time and a leave-fullscreen button, all near
+    /// white on a dark fade. Shown while the mouse moves and up to `FS_HIDE` after it stops
+    /// (also while the pointer is on the controls or a button/slider is held); the cursor
+    /// hides with them. Call after `video`.
+    pub fn fullscreen_overlay(&mut self, ctx: &egui::Context, p: &mut Player, pb: &mut Playback, video: Rect) -> Vec<ViewAction> {
+        let mut acts = Vec::new();
+        if !p.loaded || video.width() < 200.0 || video.height() < 150.0 {
+            return acts;
+        }
+        let now = Instant::now();
+        let band_h = 104.0;
+        let band = Rect::from_min_max(Pos2::new(video.left(), video.bottom() - band_h), video.max);
+        let (pos, active, scrolled) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_pressed() || i.pointer.any_down(), i.raw_scroll_delta != Vec2::ZERO));
+        if pos != self.fs_ptr || active || scrolled {
+            self.fs_ptr = pos;
+            if pos.is_some() {
+                self.fs_move = Some(now);
+            }
+        }
+        let held = pb.bar.is_dragging() || ctx.input(|i| i.pointer.any_down());
+        let recent = self.fs_move.is_some_and(|t| now - t < FS_HIDE);
+        let over = pos.is_some_and(|p| band.contains(p));
+        if !(recent || held || over) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            return acts;
+        }
+        if let Some(t) = self.fs_move {
+            if now - t < FS_HIDE {
+                ctx.request_repaint_after(FS_HIDE - (now - t) + Duration::from_millis(10));
+            }
+        }
+
+        // dark fade behind the controls so white reads on any picture
+        let fade = Rect::from_min_max(Pos2::new(video.left(), video.bottom() - band_h - 70.0), video.max);
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("fs_fade"))).with_clip_rect(video);
+        let mut mesh = egui::Mesh::default();
+        let (clear, dark) = (Color32::TRANSPARENT, Color32::from_black_alpha(185));
+        mesh.colored_vertex(fade.left_top(), clear);
+        mesh.colored_vertex(fade.right_top(), clear);
+        mesh.colored_vertex(fade.right_bottom(), dark);
+        mesh.colored_vertex(fade.left_bottom(), dark);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(egui::Shape::mesh(mesh));
+
+        if p.volume == 0.0 {
+            self.muted = true;
+        }
+        egui::Area::new(egui::Id::new("fs_controls")).fixed_pos(band.min).order(egui::Order::Foreground).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            ui.set_width(band.width());
+            ui.set_height(band.height());
+            let inner = band.shrink2(Vec2::new(28.0, 0.0));
+            // seek bar (same seek / trim rules as the normal one)
+            let bar_r = Rect::from_min_size(Pos2::new(inner.left() - 8.0, band.top() + 8.0), Vec2::new(inner.width() + 16.0, 28.0));
+            let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let evs = pb.bar.show_fullscreen(&mut bar_ui, bar_r.width(), p.dur);
+            if let Some((s, e)) = pb.bar_events(evs, p) {
+                acts.push(ViewAction::TrimSaved(s, e));
+            }
+            // buttons row
+            let row = Rect::from_min_max(Pos2::new(inner.left(), bar_r.bottom() + 6.0), Pos2::new(inner.right(), band.bottom() - 12.0));
+            let mut left = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            left.spacing_mut().item_spacing = Vec2::ZERO;
+            if fs_btn(&mut left, 36.0, "skip-prev", 18.0).on_hover_text("Previous frame").clicked() {
+                p.frame_step(true);
+            }
+            left.add_space(4.0);
+            if fs_btn(&mut left, 44.0, if p.playing() { "pause" } else { "play" }, 24.0).clicked() {
+                pb.toggle_play(p);
+            }
+            left.add_space(4.0);
+            if fs_btn(&mut left, 36.0, "skip-next", 18.0).on_hover_text("Next frame").clicked() {
+                p.frame_step(false);
+            }
+            left.add_space(18.0);
+            if fs_btn(&mut left, 36.0, if self.muted { "mute" } else { "volume" }, 19.0).clicked() {
+                self.toggle_mute(p);
+            }
+            left.add_space(4.0);
+            if let Some(v) = crate::ui::trim_slider::fs_slider(&mut left, 120.0, p.volume, 100.0) {
+                self.set_volume(p, v);
+            }
+            left.add_space(16.0);
+            left.label(egui::RichText::new(format!("{} / {}", fmt(pb.shown_pos), fmt(p.dur))).font(theme::font_ui()).color(FS_WHITE));
+
+            let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            right.spacing_mut().item_spacing = Vec2::ZERO;
+            if fs_btn(&mut right, 36.0, "fullscreen-exit", 19.0).on_hover_text("Leave fullscreen (F / Esc)").clicked() {
+                toggle_fullscreen(ctx);
+            }
+            if p.speed != 1.0 {
+                right.add_space(12.0);
+                right.label(egui::RichText::new(format!("{}x", fmt_speed(p.speed))).font(theme::font_ui()).color(FS_WHITE));
+            }
+        });
         acts
     }
 

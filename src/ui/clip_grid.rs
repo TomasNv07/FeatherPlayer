@@ -47,7 +47,6 @@ const PAD: f32 = 4.0;
 
 pub enum GridAction {
     Play(String),
-    ToggleLike(String),
     /// Sort, filter, date or "load more" changed which clips are listed: reload thumbnails.
     ListChanged,
     /// Left click on a category: show only it ("All" = everything).
@@ -270,7 +269,7 @@ impl ClipGrid {
 
     /// Python `_build_calendar`. Returns (close popup, filter changed).
     fn calendar(&mut self, ui: &mut egui::Ui, lib: &mut Library) -> (bool, bool) {
-        let (mut close, mut changed) = (false, false);
+        let (close, mut changed) = (false, false);
         let (y, m) = self.cal_ym;
         let (a, b) = (lib.date_from, lib.date_to);
         let today = Local::now().date_naive();
@@ -368,12 +367,12 @@ impl ClipGrid {
                         };
                         let font = if has { theme::font_bold() } else { theme::font_tiny() };
                         if cell(ui, Vec2::new(cw, chh), &d.day().to_string(), fg, bg, hov, font).clicked() {
-                            // 1st click = start day (popup stays open), 2nd click = end day (any order)
+                            // 1st click = start day, 2nd click = end day (any order); the popup
+                            // stays open either way (owner's change 2026-11-27, Python closed it)
                             if lib.date_from.is_some() && lib.date_pending {
                                 let s = lib.date_from.unwrap();
                                 let (lo, hi) = if s <= d { (s, d) } else { (d, s) };
                                 lib.set_date_range(Some(lo), Some(hi), false);
-                                close = true;
                             } else {
                                 lib.set_date_range(Some(d), Some(d), true);
                             }
@@ -428,7 +427,6 @@ impl ClipGrid {
             if cell(ui, Vec2::new(bw, 22.0), "Clear", theme::text_muted(), theme::card_bg(), theme::card_hover(), theme::font_tiny()).clicked() {
                 lib.set_date_range(None, None, false);
                 changed = true;
-                close = true;
             }
         });
         ui.add_space(2.0);
@@ -457,9 +455,7 @@ impl ClipGrid {
         let display: Vec<String> = display_all.into_iter().take(lib.visible_count).cloned().collect();
         let n = display.len();
         let ctx = ui.ctx().clone();
-        let (pressed1, pressed2, down2, ptr) = ctx.input(|i| {
-            (i.pointer.primary_pressed(), i.pointer.button_pressed(egui::PointerButton::Secondary), i.pointer.button_down(egui::PointerButton::Secondary), i.pointer.interact_pos())
-        });
+        let (pressed1, pressed2, down2) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.button_pressed(egui::PointerButton::Secondary), i.pointer.button_down(egui::PointerButton::Secondary)));
         if !down2 {
             self.rb_drag = false;
             self.rb_toggled.clear();
@@ -492,16 +488,12 @@ impl ClipGrid {
                 let card = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x0 + cw, y0 + rh - PAD));
                 let resp = ui.interact(card, ui.id().with(("card", path)), Sense::click());
                 let hovered = resp.contains_pointer();
-                let heart = self.draw_card(ui, card, ch, path, hovered, lib, prefs, badges);
+                self.draw_card(ui, card, ch, path, hovered, lib, prefs, badges);
                 if hovered {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     self.hovered = Some(path.clone());
                     if pressed1 {
-                        if ptr.is_some_and(|p| heart.contains(p)) {
-                            acts.push(GridAction::ToggleLike(path.clone()));
-                        } else {
-                            acts.push(GridAction::Play(path.clone()));
-                        }
+                        acts.push(GridAction::Play(path.clone()));
                     }
                     if pressed2 {
                         self.rb_drag = true;
@@ -548,9 +540,9 @@ impl ClipGrid {
         }
     }
 
-    /// Draws one card; returns the heart's hit rect.
+    /// Draws one card.
     #[allow(clippy::too_many_arguments)]
-    fn draw_card(&self, ui: &egui::Ui, card: Rect, ch: f32, path: &str, hover: bool, lib: &Library, prefs: &Prefs, badges: &Badges) -> Rect {
+    fn draw_card(&self, ui: &egui::Ui, card: Rect, ch: f32, path: &str, hover: bool, lib: &Library, prefs: &Prefs, badges: &Badges) {
         let p = ui.painter();
         let b = CARD_BORDER;
         let is_active = lib.current.as_deref() == Some(path);
@@ -587,16 +579,16 @@ impl ClipGrid {
             }
             None => icons::paint(ui, thumb.center(), "play", 22.0, theme::text_dim(), false, 1.9),
         }
-        let liked = prefs.liked.contains(path);
-        let heart = icons::paint_shadow(
-            ui,
-            Pos2::new(thumb.right() - 6.0 - 16.0, thumb.top() + 6.0),
-            "heart",
-            16.0,
-            if liked { c("#e8454a") } else { c("#dddddd") },
-            liked,
-            2.1,
-        );
+        // owner's change 2026-11-27: no clickable outline heart; a filled heart when liked and a
+        // filled star next to it when starred, as badges only (right to left: heart, star)
+        let mut bx = thumb.right() - 6.0 - 16.0;
+        if prefs.liked.contains(path) {
+            icons::paint_shadow(ui, Pos2::new(bx, thumb.top() + 6.0), "heart", 16.0, c("#e8454a"), true, 2.1);
+            bx -= 21.0;
+        }
+        if prefs.starred.contains(path) {
+            icons::paint_shadow(ui, Pos2::new(bx, thumb.top() + 6.0), "star", 16.0, c("#e8c84a"), true, 2.1);
+        }
         let ly = thumb.bottom() + 11.0;
         let p = ui.painter();
         if let Some(info) = lib.info.get(path) {
@@ -608,6 +600,5 @@ impl ClipGrid {
             p.text(Pos2::new(date_x, ly), Align2::LEFT_CENTER, &info.date_str, theme::font_tiny(), theme::text_muted());
             p.text(Pos2::new(card.right() - 6.0, ly), Align2::RIGHT_CENTER, &info.mb_str, theme::font_tiny(), theme::text_dim());
         }
-        heart
     }
 }
