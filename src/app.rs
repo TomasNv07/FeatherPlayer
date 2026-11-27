@@ -394,7 +394,8 @@ impl FeatherApp {
     /// Python `_save_window_size`: the outer size (the normal size when maximised) + max flag.
     fn save_window_size(&mut self, ctx: &egui::Context) {
         self.win.size_save_due = None;
-        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let _ = ctx;
+        let fullscreen = window::is_fullscreen();
         let hwnd = self.win.hwnd;
         if !(self.win.remember_size && self.win.size_ready()) || fullscreen || self.win.hidden || window::is_iconic(hwnd) {
             return;
@@ -445,9 +446,7 @@ impl FeatherApp {
         self.view.now_playing.clear();
         self.view.now_playing_mb.clear();
         self.pb.set_trim_mode(false, None);
-        if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        }
+        window::set_fullscreen(false);
         if !self.win.tray.show() {
             // Python: no tray icon possible -> quit
             self.real_quit(ctx);
@@ -1797,7 +1796,11 @@ impl eframe::App for FeatherApp {
             return;
         }
         // title bar first so it spans the whole width; gone in fullscreen
-        let (fullscreen, maximized) = ctx.input(|i| (i.viewport().fullscreen.unwrap_or(false), i.viewport().maximized.unwrap_or(false)));
+        let fullscreen = window::is_fullscreen(); // our own fullscreen, see window::set_fullscreen
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if fullscreen {
+            window::fullscreen_focus(ctx.input(|i| i.viewport().focused.unwrap_or(true)));
+        }
         if !fullscreen {
             match self.win.titlebar.show(ctx, maximized) {
                 Some(TitleAction::Minimize) => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),

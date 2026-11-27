@@ -81,13 +81,18 @@ fn fs_btn(ui: &mut egui::Ui, size: f32, icon: &'static str, icon_size: f32) -> e
     resp
 }
 
-fn toggle_fullscreen(ctx: &egui::Context) {
-    let cur = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!cur));
+/// Our own fullscreen (`window::set_fullscreen`, not winit's: see there).
+fn set_fullscreen(ctx: &egui::Context, on: bool) {
+    crate::window::set_fullscreen(on);
+    ctx.request_repaint();
 }
 
-fn is_fullscreen(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+fn toggle_fullscreen(ctx: &egui::Context) {
+    set_fullscreen(ctx, !crate::window::is_fullscreen());
+}
+
+fn is_fullscreen(_ctx: &egui::Context) -> bool {
+    crate::window::is_fullscreen()
 }
 
 /// Python `_fmt`: m:ss.
@@ -158,7 +163,7 @@ impl PlayerView {
         }
         // Python `_fullscreen_escape`
         if is_fullscreen(ctx) && key(egui::Key::Escape) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            set_fullscreen(ctx, false);
         }
         nav
     }
@@ -615,7 +620,7 @@ impl PlayerView {
                         self.click_t = None;
                         self.last_click = Some(now);
                         pb.toggle_play(p);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                        set_fullscreen(ctx, false);
                     } else if since(self.last_click) > 0.2 {
                         self.last_click = Some(now);
                         self.click_t = Some(now);

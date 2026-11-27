@@ -28,12 +28,84 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The main window handle, from eframe's creation context.
+/// The main window handle, from eframe's creation context (also kept for `set_fullscreen`).
 pub fn hwnd_of(cc: &eframe::CreationContext<'_>) -> HWND {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match cc.window_handle().map(|h| h.as_raw()) {
+    let h = match cc.window_handle().map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as HWND,
         _ => std::ptr::null_mut(),
+    };
+    MAIN_HWND.store(h, std::sync::atomic::Ordering::SeqCst);
+    h
+}
+
+// ── Fullscreen ───────────────────────────────────────────────────────────────
+
+static MAIN_HWND: std::sync::atomic::AtomicPtr<std::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Where the window was before fullscreen (`rcNormalPosition`, `showCmd`, flags).
+static SAVED_PLACEMENT: std::sync::Mutex<Option<SavedPlacement>> = std::sync::Mutex::new(None);
+struct SavedPlacement(WINDOWPLACEMENT);
+unsafe impl Send for SavedPlacement {}
+
+pub fn is_fullscreen() -> bool {
+    FULLSCREEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+static FS_TOPMOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fullscreen is topmost only while focused, so Alt+Tab to another app isn't stuck behind
+/// it. Call every frame while fullscreen.
+pub fn fullscreen_focus(focused: bool) {
+    let hwnd = MAIN_HWND.load(std::sync::atomic::Ordering::SeqCst);
+    if hwnd.is_null() || !is_fullscreen() || FS_TOPMOST.swap(focused, std::sync::atomic::Ordering::SeqCst) == focused {
+        return;
+    }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE};
+    let after = if focused { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe { SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+}
+
+/// Our own fullscreen instead of winit's (owner 2026-11-28): winit's borderless fullscreen
+/// covers the monitor exactly, and an OpenGL window that does that is taken for a game by
+/// the NVIDIA app (its overlay popup came up on every fullscreen). So the window covers the
+/// monitor except its bottom pixel, kept topmost so the taskbar stays behind it. Leaving
+/// puts back the saved placement (incl. maximised).
+pub fn set_fullscreen(on: bool) {
+    let hwnd = MAIN_HWND.load(std::sync::atomic::Ordering::SeqCst);
+    if hwnd.is_null() || on == is_fullscreen() {
+        return;
+    }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, HWND_TOPMOST, SWP_FRAMECHANGED, SW_SHOWNORMAL};
+    unsafe {
+        if on {
+            let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+            wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(hwnd, &mut wp) != 0 {
+                *SAVED_PLACEMENT.lock().unwrap() = Some(SavedPlacement(wp));
+            }
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(mon, &mut mi) == 0 {
+                return;
+            }
+            if IsZoomed(hwnd) != 0 {
+                ShowWindow(hwnd, SW_SHOWNORMAL); // a maximised window can't be moved freely
+            }
+            let r = mi.rcMonitor;
+            FULLSCREEN.store(true, std::sync::atomic::Ordering::SeqCst);
+            FS_TOPMOST.store(true, std::sync::atomic::Ordering::SeqCst);
+            // one pixel short at the bottom: not "covering the screen", so no game detection
+            SetWindowPos(hwnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top - 1, SWP_FRAMECHANGED);
+        } else {
+            FULLSCREEN.store(false, std::sync::atomic::Ordering::SeqCst);
+            FS_TOPMOST.store(false, std::sync::atomic::Ordering::SeqCst);
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | 0x0001 /* NOSIZE */ | 0x0002 /* NOMOVE */);
+            if let Some(SavedPlacement(wp)) = SAVED_PLACEMENT.lock().unwrap().take() {
+                SetWindowPlacement(hwnd, &wp);
+            }
+        }
     }
 }
 
