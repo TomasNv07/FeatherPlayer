@@ -18,4 +18,4 @@ Needs Rust 1.88+ and the Visual Studio C++ Build Tools.
 ## Keys
 Space play/pause, Left/Right +-5 s, Up/Down volume, F fullscreen, click video = play/pause, double-click = fullscreen.
 
-Downloads: see the Releases page.
+See `CLAUDE.md` for project notes and the porting plan.
