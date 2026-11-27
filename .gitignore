@@ -12,3 +12,4 @@ Cargo.lock.bak
 /build_installer.bat
 /build_local.bat
 /setup/
+/reference/
