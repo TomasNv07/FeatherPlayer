@@ -34,6 +34,7 @@ mod theme;
 mod tracks;
 mod tray;
 mod ui;
+mod update;
 mod window;
 
 use eframe::egui;

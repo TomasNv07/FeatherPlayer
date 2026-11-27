@@ -68,3 +68,5 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; AppUserModelI
 
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; the in-app "Update now" runs this installer with /VERYSILENT: start the new version afterwards
+Filename: "{app}\{#MyAppExe}"; Flags: nowait; Check: WizardSilent

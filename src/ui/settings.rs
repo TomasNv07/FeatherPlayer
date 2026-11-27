@@ -13,6 +13,8 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 
 pub enum SettingsAction {
     Close,
+    /// "Update now" / "Try again" in the update block.
+    Update,
     StarCopy(bool),
     ChooseStarFolder,
     CloudToggle(bool),
@@ -60,6 +62,8 @@ pub struct SettingsValues<'a> {
     pub see_more_step: usize,
     /// Thumbnail cache line ("Calculating…", "N thumbnails • size for the current folder").
     pub cache_info: &'a str,
+    /// Update check result (block at the top while an update is known).
+    pub update: &'a crate::update::Info,
 }
 
 #[derive(Default)]
@@ -281,6 +285,45 @@ fn hint_card(ui: &mut egui::Ui, title: &str, items: &[(&str, &str, &str)]) {
     });
 }
 
+/// Update block at the top of Settings (owner 2026-11-28): accent border, new version, and
+/// "Update now" (silent install, see `update`).
+fn update_block(ui: &mut egui::Ui, info: &crate::update::Info, acts: &mut Vec<SettingsAction>) {
+    use crate::update::Phase;
+    egui::Frame::new().fill(theme::card_bg()).stroke(egui::Stroke::new(1.5_f32, theme::accent())).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("UPDATE AVAILABLE").font(theme::font_bold()).color(theme::accent()));
+                ui.add_space(4.0);
+                let line = format!("Feather Player {} is out. You have {}.", info.latest, crate::update::VERSION);
+                ui.label(egui::RichText::new(line).font(theme::font_ui()).color(theme::text_primary()));
+                let (sub, col) = match &info.phase {
+                    Phase::Downloading => ("Downloading the update\u{2026}".to_owned(), theme::text_muted()),
+                    Phase::Ready(_) => ("Installing \u{2014} Feather Player restarts by itself.".to_owned(), theme::text_muted()),
+                    Phase::Error(e) => (e.clone(), theme::ERROR),
+                    _ => ("Installs in the background and restarts Feather Player. Your clips and settings stay.".to_owned(), theme::text_dim()),
+                };
+                ui.add_space(3.0);
+                ui.add(egui::Label::new(egui::RichText::new(sub).font(theme::font_tiny()).color(col)).wrap());
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, enabled) = match info.phase {
+                    Phase::Available => ("Update now", true),
+                    Phase::Error(_) => ("Try again", true),
+                    Phase::Downloading => ("Downloading\u{2026}", false),
+                    _ => ("Installing\u{2026}", false),
+                };
+                let (bg, hov) = if enabled { (theme::accent(), theme::mix(theme::accent(), Color32::WHITE, 0.15)) } else { (c("#2A2A4A"), c("#2A2A4A")) };
+                let fg = if enabled { theme::accent_fg() } else { theme::text_muted() };
+                if widgets::rounded_button(ui, text, fg, bg, hov, theme::font_bold(), 16.0, 7.0).clicked() && enabled {
+                    acts.push(SettingsAction::Update);
+                }
+            });
+        });
+    });
+}
+
 /// Python `ToggleSwitch` (42x24), returns true when clicked.
 fn toggle(ui: &mut egui::Ui, on: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(42.0, 24.0), Sense::click());
@@ -412,6 +455,11 @@ impl SettingsPage {
                         ui.set_width(col_w);
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         let path_text = |ui: &egui::Ui, p: &str| if p.is_empty() { "No folder chosen yet".to_owned() } else { ellipsize(ui, p, &theme::font_tiny(), 330.0, false) };
+
+                        if v.update.available() {
+                            update_block(ui, v.update, &mut acts);
+                            ui.add_space(22.0);
+                        }
 
                         let cur = theme::active_name();
                         section(ui, "APPEARANCE", |ui| {

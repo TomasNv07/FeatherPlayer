@@ -81,6 +81,8 @@ pub struct FeatherApp {
     egui_ctx: egui::Context,
     cloud: Cloud,
     lan: crate::lan::Lan,
+    /// Update check (once at start) + download.
+    updater: crate::update::Updater,
     settings: SettingsPage,
     settings_open: bool,
     settings_seen: bool,
@@ -297,6 +299,7 @@ impl FeatherApp {
             egui_ctx: cc.egui_ctx.clone(),
             cloud: Cloud::new(cc.egui_ctx.clone()),
             lan: crate::lan::Lan::new(cc.egui_ctx.clone()),
+            updater: crate::update::Updater::start(cc.egui_ctx.clone()),
             settings: SettingsPage::default(),
             settings_open: false,
             settings_seen: false,
@@ -1446,6 +1449,7 @@ impl FeatherApp {
 
     fn settings_action(&mut self, ctx: &egui::Context, a: SettingsAction) {
         match a {
+            SettingsAction::Update => self.updater.download(ctx),
             SettingsAction::Close => {
                 self.settings_open = false;
                 if std::mem::take(&mut self.thumbs_dirty) {
@@ -1804,6 +1808,17 @@ impl eframe::App for FeatherApp {
         ctx.request_repaint_after(Duration::from_secs(5));
         self.folder_watch_tick(ctx);
 
+        // update downloaded: start the silent installer and quit (it starts the new version)
+        let update = self.updater.info();
+        if let crate::update::Phase::Ready(path) = &update.phase {
+            if crate::update::run_installer(path) {
+                self.real_quit(ctx);
+                return;
+            }
+            self.updater.set_error("Could not start the installer. Try again.");
+        }
+        let update_badge = update.available();
+
         if self.settings_open {
             let star_folder = self.prefs.star_copy_folder.clone();
             let v = SettingsValues {
@@ -1820,6 +1835,7 @@ impl eframe::App for FeatherApp {
                 auto_refresh: self.auto_refresh,
                 see_more_step: self.lib.see_more_step,
                 cache_info: &self.cache_info,
+                update: &update,
             };
             let acts = self.settings.show(ctx, &v, &self.cloud, &self.lan, &self.lib);
             for a in acts {
@@ -1854,7 +1870,7 @@ impl eframe::App for FeatherApp {
             egui::TopBottomPanel::top("header")
                 .frame(egui::Frame::new().fill(theme::bg()).inner_margin(egui::Margin::symmetric(16, 10)))
                 .show_separator_line(false)
-                .show(ctx, |ui| header_acts = self.header.show(ui, &self.lib, &self.prefs, trim_mode));
+                .show(ctx, |ui| header_acts = self.header.show(ui, &self.lib, &self.prefs, trim_mode, update_badge));
 
             let clip = match &self.lib.current {
                 Some(path) => ClipState {

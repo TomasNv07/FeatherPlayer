@@ -6,20 +6,22 @@ rem Needs Inno Setup (found through the registry; or set ISCC=path\to\ISCC.exe f
 setlocal
 cd /d "%~dp0"
 
-call "%~dp0build_local.bat" nopause
-if errorlevel 1 goto :fail
-rem an installer without ffmpeg would ship an app without thumbnails / trim / compress / share
-if not exist "dist\FeatherPlayer\ffmpeg\ffmpeg.exe" (
-    echo ERROR: ffmpeg.exe was not copied ^(needs %USERPROFILE%\FeatherPlayer\ffmpeg\ffmpeg.exe^).
-    goto :fail
-)
-
 set "VER=%~1"
 if "%VER%"=="" (
     for /f "usebackq delims=" %%v in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup\next_version.ps1"`) do set "VER=%%v"
 )
 if "%VER%"=="" (
     echo ERROR: could not work out the version.
+    goto :fail
+)
+
+rem the exe knows its own version (update check, build.rs reads FP_VERSION)
+set "FP_VERSION=%VER%"
+call "%~dp0build_local.bat" nopause
+if errorlevel 1 goto :fail
+rem an installer without ffmpeg would ship an app without thumbnails / trim / compress / share
+if not exist "dist\FeatherPlayer\ffmpeg\ffmpeg.exe" (
+    echo ERROR: ffmpeg.exe was not copied ^(needs %USERPROFILE%\FeatherPlayer\ffmpeg\ffmpeg.exe^).
     goto :fail
 )
 

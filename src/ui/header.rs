@@ -45,7 +45,8 @@ fn stat(ui: &mut egui::Ui, text: &str) {
 
 impl Header {
     /// `trim_mode`: show the "Apply trim" pill (trim mode is on for the open clip).
-    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, prefs: &Prefs, trim_mode: bool) -> Vec<HeaderAction> {
+    /// `update_badge`: an update is available: accent "!" at the gear's top-right.
+    pub fn show(&mut self, ui: &mut egui::Ui, lib: &Library, prefs: &Prefs, trim_mode: bool, update_badge: bool) -> Vec<HeaderAction> {
         let mut acts = Vec::new();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -88,7 +89,14 @@ impl Header {
                 widgets::pill_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
-                        if Ghost::new("").icon("gear", 18.0).padx(8.0).show(ui).on_hover_text("Settings").clicked() {
+                        let tip = if update_badge { "Settings \u{2014} an update is available" } else { "Settings" };
+                        let gear = Ghost::new("").icon("gear", 18.0).padx(8.0).show(ui).on_hover_text(tip);
+                        if update_badge {
+                            // small accent "!" at the gear's top-right (owner 2026-11-28)
+                            let p = Pos2::new(gear.rect.right() - 6.0, gear.rect.top() + 6.0);
+                            ui.painter().text(p, Align2::CENTER_CENTER, "!", egui::FontId::new(13.0, theme::bold_family()), theme::accent());
+                        }
+                        if gear.clicked() {
                             acts.push(HeaderAction::Settings);
                         }
                         widgets::pill_divider(ui);
