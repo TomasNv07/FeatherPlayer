@@ -56,6 +56,40 @@ pub fn apply_dark_frame(hwnd: HWND, bg: egui::Color32) {
     set(34, colorref(bg)); // DWMWA_BORDER_COLOR
 }
 
+/// winit message hook (every message, before it is dispatched): keeps frames coming while the
+/// mouse moves. Windows hands out WM_PAINT (= eframe's next frame) only when no input is
+/// waiting, and while the mouse moves fast there almost always is a new WM_MOUSEMOVE, so
+/// frames came 200-600 ms apart and the video stuttered (measured 2026-11-28: each frame
+/// took 0-4 ms, they just weren't delivered). On mouse input, a waiting WM_PAINT is taken
+/// out of the queue and handled first, at most every 12 ms.
+pub fn msg_hook(msg: *const std::ffi::c_void) -> bool {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, MSG, PM_REMOVE, WM_INPUT, WM_MOUSEMOVE, WM_NCMOUSEMOVE, WM_PAINT};
+    thread_local! {
+        static LAST_PAINT: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+    if msg.is_null() {
+        return false;
+    }
+    let m = unsafe { &*(msg as *const MSG) };
+    match m.message {
+        WM_PAINT => LAST_PAINT.with(|l| l.set(Some(Instant::now()))),
+        WM_MOUSEMOVE | WM_NCMOUSEMOVE | WM_INPUT => {
+            let due = LAST_PAINT.with(|l| l.get()).is_none_or(|t| t.elapsed() >= Duration::from_millis(12));
+            if due {
+                let mut p: MSG = unsafe { std::mem::zeroed() };
+                if unsafe { PeekMessageW(&mut p, std::ptr::null_mut(), WM_PAINT, WM_PAINT, PM_REMOVE) } != 0 {
+                    LAST_PAINT.with(|l| l.set(Some(Instant::now())));
+                    unsafe { DispatchMessageW(&p) };
+                }
+            }
+        }
+        _ => {}
+    }
+    false // always dispatch the message itself as usual
+}
+
 /// Stop the raw mouse input winit registers for (`DeviceEvent::MouseMotion`, which nothing
 /// here uses). A high polling-rate mouse sends thousands of WM_INPUT messages a second, and
 /// Windows only delivers WM_PAINT (= the next frame) when the queue is empty, so moving the

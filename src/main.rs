@@ -71,7 +71,16 @@ fn main() -> eframe::Result<()> {
     if tray::pic_path("feather2.png").is_some() {
         viewport = viewport.with_icon(egui::IconData { rgba, width: w, height: h });
     }
-    let options = eframe::NativeOptions { renderer: eframe::Renderer::Glow, viewport, ..Default::default() };
+    let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Glow,
+        viewport,
+        // frames kept coming while the mouse moves (see window::msg_hook)
+        event_loop_builder: Some(Box::new(|b| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            b.with_msg_hook(window::msg_hook);
+        })),
+        ..Default::default()
+    };
     eframe::run_native(
         "FeatherPlayer-rs",
         options,

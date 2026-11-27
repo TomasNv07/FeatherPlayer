@@ -1034,6 +1034,7 @@ dependencies = [
  "tiny-skia",
  "tray-icon",
  "windows-sys 0.59.0",
+ "winit",
  "winresource",
 ]
 
