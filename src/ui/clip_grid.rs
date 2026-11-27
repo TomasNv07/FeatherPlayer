@@ -76,6 +76,11 @@ pub struct ClipGrid {
     cal_year_open: bool,
     /// Clip card under the mouse this frame (preloaded by the app).
     pub hovered: Option<String>,
+    /// Scroll position in card rows and the row height it was measured with: when the
+    /// sidebar width changes the cards change height, and the list is put back on the same
+    /// card instead of the same pixel offset (owner 2026-11-28: it jumped a lot).
+    scroll_rows: f32,
+    last_rh: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -472,8 +477,14 @@ impl ClipGrid {
             (cw, ch, ch + 22.0 + PAD * 2.0)
         };
         let line = ctx.options(|o| o.input_options.line_scroll_speed).max(1.0);
-        let wheel = row_h(ui.available_width()).2 / line;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL).wheel_scroll_multiplier(Vec2::new(1.0, wheel)).show_viewport(ui, |ui, vp| {
+        let rh_now = row_h(ui.available_width()).2;
+        let wheel = rh_now / line;
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL).wheel_scroll_multiplier(Vec2::new(1.0, wheel));
+        if self.last_rh > 0.0 && (rh_now - self.last_rh).abs() > 0.5 {
+            // width changed: keep the same card at the top
+            area = area.vertical_scroll_offset(self.scroll_rows * rh_now);
+        }
+        let out = area.show_viewport(ui, |ui, vp| {
             let w = ui.available_width();
             let (cw, ch, rh) = row_h(w);
             let extra = if total > n { 76.0 } else { 0.0 };
@@ -522,6 +533,8 @@ impl ClipGrid {
                 load_all = mk(ui, btn_y + 38.0, format!("Load all  ({remaining} clips)"), "load_all");
             }
         });
+        self.last_rh = rh_now;
+        self.scroll_rows = out.state.offset.y / rh_now.max(1.0);
         if load_more {
             lib.show_more();
             acts.push(GridAction::ListChanged);
